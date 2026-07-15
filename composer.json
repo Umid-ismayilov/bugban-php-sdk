@@ -1,0 +1,35 @@
+{
+    "name": "bugban/php-sdk",
+    "description": "Bugban error & monitoring SDK — framework-agnostic PHP core (captures exceptions, requests, auth & session).",
+    "type": "library",
+    "keywords": ["bugban", "error-tracking", "monitoring", "exceptions"],
+    "license": "MIT",
+    "require": {
+        "php": ">=7.0",
+        "ext-json": "*"
+    },
+    "suggest": {
+        "ext-curl": "Preferred HTTP transport; without it the SDK falls back to PHP streams (needs allow_url_fopen=On)."
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^6.5 || ^7.5 || ^8.5 || ^9.5 || ^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Bugban\\Sdk\\": "src/"
+        },
+        "files": [
+            "src/helpers.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Bugban\\Sdk\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
