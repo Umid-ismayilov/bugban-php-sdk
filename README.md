@@ -88,13 +88,38 @@ require APPPATH . '../libs/bugban-php-sdk/autoload.php';
 | `timeout` | `3` | Transport timeout (s) |
 | `sample_rate` | `1.0` | 0–1 fraction of events to send |
 | `capture_requests` | `false` | Push per-request performance logs |
+| `capture_queries` | `true` | Slow-query (performance) monitoring master switch |
+| `slow_query_ms` | `1000` | Only queries slower than this (ms) are reported |
 | `redact` | common secrets | Keys scrubbed before sending |
 | `before_send` | `null` | `fn(array $payload): ?array` filter/mutate |
 | `code_context_lines` | `5` | Fallback source window (± lines) around each frame |
 | `code_full_function` | `true` | Capture the ENTIRE enclosing function/method body per frame (falls back to the ± window when unresolvable) |
 
+## Slow query monitoring
+Works with **any** database (MySQL, PostgreSQL, SQLite, ...) — the SDK just reports SQL text + duration. Queries faster than `slow_query_ms` are dropped; slow ones are batched into a single non-blocking POST at shutdown (max 25 per request).
+
+**Manual — any framework, any DB layer** (report the duration in milliseconds):
+
+```php
+$start = microtime(true);
+$rows = $db->fetchAll($sql, $params);
+\Bugban\Sdk\Bugban::recordQuery($sql, (microtime(true) - $start) * 1000, array(
+    'connection' => 'mysql',        // optional
+    'bindings'   => $params,        // optional
+));
+```
+
+**Automatic — pure PHP with PDO**: use the drop-in `TracedPdo` (times `query()`, `exec()` and prepared `execute()` automatically):
+
+```php
+$pdo = new \Bugban\Sdk\Support\TracedPdo('mysql:host=localhost;dbname=app', $user, $pass);
+// use exactly like \PDO
+```
+
+The caller file/line (first frame outside `vendor/`), request URL + method, and redacted/capped bindings are attached automatically. Framework adapters (`bugban/laravel`, `bugban/codeigniter`, `bugban/yii2`) wire this up automatically.
+
 ## What gets sent
-`POST {host}/api/ingest/events` with header `X-Bugban-Key: {api_key}` — exception class, message, file/line, stacktrace, request, auth user, session, breadcrumbs, context. Request logs go to `POST {host}/api/ingest/requests`.
+`POST {host}/api/ingest/events` with header `X-Bugban-Key: {api_key}` — exception class, message, file/line, stacktrace, request, auth user, session, breadcrumbs, context. Request logs go to `POST {host}/api/ingest/requests`. Slow queries go to `POST {host}/api/ingest/queries` (SQL text, duration ms, connection, caller file/line, url).
 
 ## API key & plans
 Your API key is issued from the Bugban panel per project and is tied to your plan/subscription. Higher plans raise ingest rate limits and retention.

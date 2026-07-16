@@ -11,7 +11,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
 
     /** @var Client|null */
     private static $client = null;
@@ -77,6 +77,22 @@ class Bugban
     {
         if (self::$client) {
             self::$client->setContext($key, $value);
+        }
+    }
+
+    /**
+     * Record a database query for slow-query (performance) monitoring.
+     * Queries faster than the configured slow_query_ms threshold are ignored;
+     * slow ones are batched and delivered non-blocking at shutdown. Never throws.
+     *
+     * @param string $sql        Raw SQL text.
+     * @param float|int $durationMs Duration in MILLISECONDS.
+     * @param array  $meta       Optional: connection, bindings, file, line.
+     */
+    public static function recordQuery($sql, $durationMs, array $meta = array())
+    {
+        if (self::$client) {
+            self::$client->recordQuery($sql, $durationMs, $meta);
         }
     }
 

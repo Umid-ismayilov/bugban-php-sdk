@@ -12,6 +12,8 @@ class Config
     /** @var int */ public $timeout;
     /** @var float */ public $sampleRate;
     /** @var bool */ public $captureRequests;
+    /** @var bool Capture slow database queries (see $slowQueryMs). */ public $captureQueries;
+    /** @var int Minimum query duration (milliseconds) to report as a slow query. */ public $slowQueryMs;
     /** @var array */ public $redact;
     /** @var callable|null */ public $beforeSend;
     /** @var callable|null */ public $contextResolver;
@@ -33,6 +35,8 @@ class Config
         $this->timeout = isset($c['timeout']) ? (int) $c['timeout'] : 3;
         $this->sampleRate = isset($c['sample_rate']) ? (float) $c['sample_rate'] : 1.0;
         $this->captureRequests = isset($c['capture_requests']) ? (bool) $c['capture_requests'] : false;
+        $this->captureQueries = isset($c['capture_queries']) ? (bool) $c['capture_queries'] : true;
+        $this->slowQueryMs = isset($c['slow_query_ms']) ? (int) $c['slow_query_ms'] : 1000;
         $this->redact = (isset($c['redact']) && is_array($c['redact']))
             ? $c['redact']
             : array('password', 'password_confirmation', 'token', 'secret', 'authorization', 'cookie', 'api_key');
@@ -68,6 +72,11 @@ class Config
     public function requestsUrl()
     {
         return $this->host . '/api/ingest/requests';
+    }
+
+    public function queriesUrl()
+    {
+        return $this->host . '/api/ingest/queries';
     }
 
     public function pingUrl()
