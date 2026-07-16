@@ -15,6 +15,7 @@ class Config
     /** @var array */ public $redact;
     /** @var callable|null */ public $beforeSend;
     /** @var callable|null */ public $contextResolver;
+    /** @var int */ public $codeContextLines;
 
     public function __construct(array $c = array())
     {
@@ -31,6 +32,7 @@ class Config
             : array('password', 'password_confirmation', 'token', 'secret', 'authorization', 'cookie', 'api_key');
         $this->beforeSend = isset($c['before_send']) ? $c['before_send'] : null;
         $this->contextResolver = isset($c['context_resolver']) ? $c['context_resolver'] : null;
+        $this->codeContextLines = isset($c['code_context_lines']) ? (int) $c['code_context_lines'] : 5;
     }
 
     public function isUsable()
