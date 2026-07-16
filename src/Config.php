@@ -18,6 +18,10 @@ class Config
     /** @var int */ public $codeContextLines;
     /** @var bool */ public $codeFullFunction;
     /** @var bool */ public $sendOnShutdown;
+    /** @var string|null Human-readable application name (shown in the panel after the install ping). */ public $appName;
+    /** @var string|null Framework name provided by an adapter (e.g. 'laravel'). */ public $framework;
+    /** @var string|null Framework version provided by an adapter. */ public $frameworkVersion;
+    /** @var string|null Notifier/SDK package name override (adapters may set e.g. 'bugban/laravel'). */ public $sdkName;
 
     public function __construct(array $c = array())
     {
@@ -44,6 +48,11 @@ class Config
         $this->sendOnShutdown = isset($c['send_on_shutdown'])
             ? (bool) $c['send_on_shutdown']
             : (PHP_SAPI !== 'cli');
+        // Optional metadata used by the one-time install ping (SDK handshake).
+        $this->appName = (isset($c['app_name']) && $c['app_name'] !== '' && $c['app_name'] !== null) ? (string) $c['app_name'] : null;
+        $this->framework = (isset($c['framework']) && $c['framework'] !== '' && $c['framework'] !== null) ? (string) $c['framework'] : null;
+        $this->frameworkVersion = (isset($c['framework_version']) && $c['framework_version'] !== '' && $c['framework_version'] !== null) ? (string) $c['framework_version'] : null;
+        $this->sdkName = (isset($c['sdk']) && $c['sdk'] !== '' && $c['sdk'] !== null) ? (string) $c['sdk'] : null;
     }
 
     public function isUsable()
@@ -59,5 +68,10 @@ class Config
     public function requestsUrl()
     {
         return $this->host . '/api/ingest/requests';
+    }
+
+    public function pingUrl()
+    {
+        return $this->host . '/api/ingest/ping';
     }
 }

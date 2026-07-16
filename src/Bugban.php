@@ -2,12 +2,17 @@
 
 namespace Bugban\Sdk;
 
+use Bugban\Sdk\Support\Pinger;
+
 /**
  * Global entry point. Works in ANY environment (pure PHP, CodeIgniter, Symfony, WordPress...).
  * In Laravel the service provider wires this up automatically.
  */
 class Bugban
 {
+    /** SDK version (sent with the one-time install ping). */
+    const VERSION = '1.1.0';
+
     /** @var Client|null */
     private static $client = null;
 
@@ -19,12 +24,14 @@ class Bugban
     public static function init(array $config)
     {
         self::$client = new Client(new Config($config));
+        Pinger::maybePing(self::$client->config());
         return self::$client;
     }
 
     public static function setClient(Client $client)
     {
         self::$client = $client;
+        Pinger::maybePing($client->config());
     }
 
     /**
