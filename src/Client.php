@@ -100,7 +100,7 @@ class Client
             'handled' => true,
             'release' => $this->config->release,
             'environment' => $this->config->environment,
-            'stacktrace' => StacktraceBuilder::fromThrowable($e, $this->config->codeContextLines),
+            'stacktrace' => StacktraceBuilder::fromThrowable($e, $this->config->codeContextLines, $this->config->codeFullFunction),
             'request' => $ctx['request'],
             'session' => $ctx['session'],
             'user' => $ctx['user'],

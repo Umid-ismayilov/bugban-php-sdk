@@ -16,6 +16,7 @@ class Config
     /** @var callable|null */ public $beforeSend;
     /** @var callable|null */ public $contextResolver;
     /** @var int */ public $codeContextLines;
+    /** @var bool */ public $codeFullFunction;
     /** @var bool */ public $sendOnShutdown;
 
     public function __construct(array $c = array())
@@ -34,6 +35,9 @@ class Config
         $this->beforeSend = isset($c['before_send']) ? $c['before_send'] : null;
         $this->contextResolver = isset($c['context_resolver']) ? $c['context_resolver'] : null;
         $this->codeContextLines = isset($c['code_context_lines']) ? (int) $c['code_context_lines'] : 5;
+        // Capture the WHOLE enclosing function/method body for stack frames (falls back
+        // to the ±code_context_lines window when the callable cannot be resolved).
+        $this->codeFullFunction = isset($c['code_full_function']) ? (bool) $c['code_full_function'] : true;
         // Defer telemetry to shutdown (after the response is flushed to the user) on web SAPIs.
         // On CLI there is no fastcgi_finish_request and scripts are short-lived, so send inline
         // by default to guarantee delivery before the process exits.

@@ -90,6 +90,8 @@ require APPPATH . '../libs/bugban-php-sdk/autoload.php';
 | `capture_requests` | `false` | Push per-request performance logs |
 | `redact` | common secrets | Keys scrubbed before sending |
 | `before_send` | `null` | `fn(array $payload): ?array` filter/mutate |
+| `code_context_lines` | `5` | Fallback source window (± lines) around each frame |
+| `code_full_function` | `true` | Capture the ENTIRE enclosing function/method body per frame (falls back to the ± window when unresolvable) |
 
 ## What gets sent
 `POST {host}/api/ingest/events` with header `X-Bugban-Key: {api_key}` — exception class, message, file/line, stacktrace, request, auth user, session, breadcrumbs, context. Request logs go to `POST {host}/api/ingest/requests`.
