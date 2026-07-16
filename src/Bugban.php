@@ -74,6 +74,17 @@ class Bugban
     }
 
     /**
+     * Force-send any buffered (deferred) telemetry immediately.
+     * Handy for CLI scripts, tests and queue workers.
+     */
+    public static function flush()
+    {
+        if (self::$client) {
+            self::$client->flush();
+        }
+    }
+
+    /**
      * Register global error/exception/shutdown handlers — the one-liner for
      * pure-PHP and legacy projects to get automatic capture with no framework.
      */

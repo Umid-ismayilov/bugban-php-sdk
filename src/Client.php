@@ -24,6 +24,12 @@ class Client
     private $user = null;
     /** @var array */
     private $extraContext = array();
+    /** @var array Buffered telemetry payloads (each: array('url' => string, 'payload' => array)) */
+    private $queue = array();
+    /** @var bool Guard so only ONE shutdown function is ever registered per client. */
+    private $shutdownRegistered = false;
+    /** @var bool True once the shutdown flush has begun; later captures then send inline. */
+    private $shutdownStarted = false;
 
     public function __construct(Config $config, Transport $transport = null)
     {
@@ -146,7 +152,7 @@ class Client
         if (!$this->config->isUsable()) {
             return;
         }
-        $this->transport->send($this->config->requestsUrl(), $this->config->apiKey, $data);
+        $this->emit($this->config->requestsUrl(), $data);
     }
 
     private function dispatch(array $payload)
@@ -157,7 +163,108 @@ class Client
                 return;
             }
         }
-        $this->transport->send($this->config->eventsUrl(), $this->config->apiKey, $payload);
+        $this->emit($this->config->eventsUrl(), $payload);
+    }
+
+    /**
+     * Either buffer the payload for a non-blocking shutdown flush (web SAPI, deferred),
+     * or send it inline (CLI, flag off, or when we are already flushing at shutdown).
+     */
+    private function emit($url, array $payload)
+    {
+        $deferred = $this->config->sendOnShutdown && !$this->shutdownStarted;
+        if ($deferred) {
+            $this->queue[] = array('url' => $url, 'payload' => $payload);
+            $this->registerShutdownFlush();
+            return;
+        }
+        $this->sendOne($url, $payload);
+    }
+
+    /**
+     * Register EXACTLY ONE shutdown function (guarded) that flushes the buffered queue
+     * AFTER the HTTP response has been handed back to the end user.
+     */
+    private function registerShutdownFlush()
+    {
+        if ($this->shutdownRegistered) {
+            return;
+        }
+        $this->shutdownRegistered = true;
+        $self = $this;
+        register_shutdown_function(function () use ($self) {
+            $self->runShutdownFlush();
+        });
+    }
+
+    /**
+     * Shutdown handler: flush the response to the user first (PHP-FPM / LiteSpeed),
+     * then deliver the buffered telemetry. Public because it is invoked from the
+     * registered shutdown closure. Never throws.
+     */
+    public function runShutdownFlush()
+    {
+        // From now on, any freshly-captured events (e.g. a fatal caught by the SDK's own
+        // shutdown handler that runs after this one) send inline instead of buffering.
+        $this->shutdownStarted = true;
+
+        // Hand the response back to the end user BEFORE we spend time on HTTP sends,
+        // so telemetry adds zero perceived latency under PHP-FPM.
+        if (function_exists('fastcgi_finish_request')) {
+            try {
+                fastcgi_finish_request();
+            } catch (\Exception $e) {
+                // non-fatal
+            } catch (\Throwable $e) {
+                // non-fatal
+            }
+        } elseif (function_exists('litespeed_finish_request')) {
+            try {
+                litespeed_finish_request();
+            } catch (\Exception $e) {
+                // non-fatal
+            } catch (\Throwable $e) {
+                // non-fatal
+            }
+        }
+
+        $this->flushQueue();
+    }
+
+    /**
+     * Force-send any buffered telemetry immediately. Useful for CLI, tests and
+     * queue workers that want deterministic, synchronous delivery.
+     */
+    public function flush()
+    {
+        $this->flushQueue();
+    }
+
+    private function flushQueue()
+    {
+        if (empty($this->queue)) {
+            return;
+        }
+        // Detach first so a re-entrant capture during send can't cause a double-send.
+        $items = $this->queue;
+        $this->queue = array();
+        foreach ($items as $item) {
+            $this->sendOne($item['url'], $item['payload']);
+        }
+    }
+
+    /**
+     * Single transport send, fully guarded — the client app must NEVER get an exception.
+     */
+    private function sendOne($url, array $payload)
+    {
+        try {
+            $this->transport->send($url, $this->config->apiKey, $payload);
+        } catch (\Exception $e) {
+            // Telemetry must be non-fatal.
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
     }
 
     private function collectContext()

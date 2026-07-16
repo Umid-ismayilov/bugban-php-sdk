@@ -16,6 +16,7 @@ class Config
     /** @var callable|null */ public $beforeSend;
     /** @var callable|null */ public $contextResolver;
     /** @var int */ public $codeContextLines;
+    /** @var bool */ public $sendOnShutdown;
 
     public function __construct(array $c = array())
     {
@@ -33,6 +34,12 @@ class Config
         $this->beforeSend = isset($c['before_send']) ? $c['before_send'] : null;
         $this->contextResolver = isset($c['context_resolver']) ? $c['context_resolver'] : null;
         $this->codeContextLines = isset($c['code_context_lines']) ? (int) $c['code_context_lines'] : 5;
+        // Defer telemetry to shutdown (after the response is flushed to the user) on web SAPIs.
+        // On CLI there is no fastcgi_finish_request and scripts are short-lived, so send inline
+        // by default to guarantee delivery before the process exits.
+        $this->sendOnShutdown = isset($c['send_on_shutdown'])
+            ? (bool) $c['send_on_shutdown']
+            : (PHP_SAPI !== 'cli');
     }
 
     public function isUsable()
