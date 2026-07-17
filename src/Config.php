@@ -14,6 +14,7 @@ class Config
     /** @var bool */ public $captureRequests;
     /** @var bool Capture slow database queries (see $slowQueryMs). */ public $captureQueries;
     /** @var int Minimum query duration (milliseconds) to report as a slow query. */ public $slowQueryMs;
+    /** @var bool Run EXPLAIN on slow SELECTs (Laravel adapter / TracedPdo) to detect index usage. */ public $explainQueries;
     /** @var array */ public $redact;
     /** @var callable|null */ public $beforeSend;
     /** @var callable|null */ public $contextResolver;
@@ -37,6 +38,7 @@ class Config
         $this->captureRequests = isset($c['capture_requests']) ? (bool) $c['capture_requests'] : false;
         $this->captureQueries = isset($c['capture_queries']) ? (bool) $c['capture_queries'] : true;
         $this->slowQueryMs = isset($c['slow_query_ms']) ? (int) $c['slow_query_ms'] : 1000;
+        $this->explainQueries = isset($c['explain_queries']) ? (bool) $c['explain_queries'] : true;
         $this->redact = (isset($c['redact']) && is_array($c['redact']))
             ? $c['redact']
             : array('password', 'password_confirmation', 'token', 'secret', 'authorization', 'cookie', 'api_key');

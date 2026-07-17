@@ -26,6 +26,13 @@ class TracedPdo extends \PDO
     /** @var string Driver name reported as the query "connection". */
     private $bugbanDriver = 'sql';
 
+    /**
+     * @var bool Reentrancy guard. True while we are running an EXPLAIN through
+     * this same handle so the EXPLAIN query itself is neither timed/recorded
+     * nor re-explained (it flows through query()/TracedPdoStatement::execute()).
+     */
+    private static $bugbanExplaining = false;
+
     public function __construct($dsn, $username = null, $password = null, $options = null)
     {
         parent::__construct($dsn, $username, $password, $options === null ? array() : $options);
@@ -43,17 +50,117 @@ class TracedPdo extends \PDO
 
         try {
             // prepare() then returns TracedPdoStatement, whose execute() is timed.
-            // (Not supported for persistent connections — guarded; statements
-            // simply stay untimed in that case.)
+            // The PDO handle ($this) is passed so the statement can run EXPLAIN
+            // on the same connection. (Not supported for persistent connections
+            // — guarded; statements simply stay untimed in that case.)
             $this->setAttribute(
                 \PDO::ATTR_STATEMENT_CLASS,
-                array('Bugban\\Sdk\\Support\\TracedPdoStatement', array($this->bugbanDriver))
+                array('Bugban\\Sdk\\Support\\TracedPdoStatement', array($this->bugbanDriver, $this))
             );
         } catch (\Exception $e) {
             // non-fatal
         } catch (\Throwable $e) {
             // non-fatal
         }
+    }
+
+    /**
+     * True while an EXPLAIN is in flight — the statement class checks this to
+     * avoid recording/explaining the EXPLAIN query itself.
+     *
+     * @return bool
+     */
+    public static function bugbanIsExplaining()
+    {
+        return self::$bugbanExplaining;
+    }
+
+    /**
+     * Decide whether to EXPLAIN a query and, if so, run it. Returns the
+     * normalized explain array, or null when explain is disabled/not needed or
+     * anything goes wrong. NEVER throws.
+     *
+     * @param string    $sql
+     * @param float|int $durationMs
+     * @param array     $bindings
+     * @return array|null
+     */
+    public function bugbanMaybeExplain($sql, $durationMs, $bindings = array())
+    {
+        try {
+            $client = Bugban::client();
+            if ($client === null) {
+                return null;
+            }
+            $cfg = $client->config();
+            if (!$cfg->captureQueries || !$cfg->explainQueries) {
+                return null;
+            }
+            if ((float) $durationMs < $cfg->slowQueryMs) {
+                return null;
+            }
+            if (!self::bugbanIsSelect($sql)) {
+                return null;
+            }
+            return $this->bugbanRunExplain((string) $sql, is_array($bindings) ? $bindings : array());
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Run EXPLAIN on the same handle and normalize the result. Guarded by the
+     * reentrancy flag so the EXPLAIN query is not itself captured. NEVER throws.
+     *
+     * @param string $sql
+     * @param array  $bindings
+     * @return array|null
+     */
+    private function bugbanRunExplain($sql, array $bindings)
+    {
+        if (self::$bugbanExplaining) {
+            return null;
+        }
+        self::$bugbanExplaining = true;
+        $explain = null;
+        try {
+            $driver = $this->bugbanDriver;
+            $prefix = ($driver === 'sqlite') ? 'EXPLAIN QUERY PLAN ' : 'EXPLAIN ';
+            $values = array_values($bindings);
+
+            if (empty($values)) {
+                $stmt = parent::query($prefix . $sql);
+                $rows = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : array();
+            } else {
+                // parent::prepare() returns a TracedPdoStatement, but its
+                // execute() bails on the reentrancy flag, so no recursion.
+                $stmt = parent::prepare($prefix . $sql);
+                if ($stmt === false) {
+                    self::$bugbanExplaining = false;
+                    return null;
+                }
+                $stmt->execute($values);
+                $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+            }
+            $explain = ExplainParser::parse($driver, is_array($rows) ? $rows : array());
+        } catch (\Exception $e) {
+            $explain = null;
+        } catch (\Throwable $e) {
+            $explain = null;
+        }
+        self::$bugbanExplaining = false;
+        return $explain;
+    }
+
+    /**
+     * @param string $sql
+     * @return bool True if the statement is a plain SELECT.
+     */
+    private static function bugbanIsSelect($sql)
+    {
+        return stripos(ltrim((string) $sql), 'select') === 0;
     }
 
     #[\ReturnTypeWillChange]
@@ -82,11 +189,14 @@ class TracedPdo extends \PDO
     private function bugbanRecord($sql, $start)
     {
         try {
-            Bugban::recordQuery(
-                (string) $sql,
-                (microtime(true) - $start) * 1000,
-                array('connection' => $this->bugbanDriver)
-            );
+            $durationMs = (microtime(true) - $start) * 1000;
+            $meta = array('connection' => $this->bugbanDriver);
+            // query()/exec() carry no bindings; explain runs only for slow SELECTs.
+            $explain = $this->bugbanMaybeExplain((string) $sql, $durationMs, array());
+            if (is_array($explain)) {
+                $meta['explain'] = $explain;
+            }
+            Bugban::recordQuery((string) $sql, $durationMs, $meta);
         } catch (\Exception $e) {
             // telemetry must be non-fatal
         } catch (\Throwable $e) {

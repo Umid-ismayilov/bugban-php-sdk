@@ -221,6 +221,14 @@ class Client
                 $row['bindings'] = $this->sanitizeBindings($meta['bindings']);
             }
 
+            // Optional EXPLAIN / index-usage result, produced by the Laravel
+            // adapter or TracedPdo (via ExplainParser). Forwarded as-is; the
+            // server flags full-table-scans from it. Callers of the core may
+            // also pass their own meta['explain'] for other frameworks.
+            if (isset($meta['explain']) && is_array($meta['explain']) && !empty($meta['explain'])) {
+                $row['explain'] = $meta['explain'];
+            }
+
             // Caller: explicit meta wins; otherwise first stack frame outside
             // vendor/ and outside the SDK itself.
             if (isset($meta['file']) && is_string($meta['file']) && $meta['file'] !== '') {
