@@ -11,10 +11,13 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
 
     /** @var Client|null */
     private static $client = null;
+
+    /** @var bool Recursion guard: true while a log record is being forwarded. */
+    private static $recordingLog = false;
 
     /**
      * Initialize with a config array. Returns the client.
@@ -94,6 +97,35 @@ class Bugban
         if (self::$client) {
             self::$client->recordQuery($sql, $durationMs, $meta);
         }
+    }
+
+    /**
+     * Forward a log record (Log::error / Log::critical / caught-and-logged error) to
+     * Bugban as a handled event. No-op unless the SDK is usable, capture_logs is on and
+     * $level is at/above the configured log_level. NEVER throws.
+     *
+     * A static in-progress flag guards against infinite recursion: if delivering a log
+     * record itself triggers logging (e.g. a Monolog handler re-enters this method), the
+     * nested call returns immediately instead of looping.
+     *
+     * @param string $level   PSR level: debug|info|notice|warning|error|critical|alert|emergency.
+     * @param string $message The log message.
+     * @param array  $context Monolog context array (redacted before sending).
+     */
+    public static function recordLog($level, $message, array $context = array())
+    {
+        if (self::$recordingLog || !self::$client) {
+            return;
+        }
+        self::$recordingLog = true;
+        try {
+            self::$client->recordLogEvent($level, $message, $context);
+        } catch (\Exception $e) {
+            // Telemetry must be non-fatal.
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
+        self::$recordingLog = false;
     }
 
     /**

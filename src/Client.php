@@ -157,6 +157,210 @@ class Client
     }
 
     /**
+     * PSR log-level severity ranking (higher = more severe). Unknown levels are
+     * treated as 'error' so they are never silently dropped by the threshold.
+     *
+     * @param mixed $level
+     * @return int
+     */
+    private static function levelSeverity($level)
+    {
+        $map = array(
+            'debug' => 0,
+            'info' => 1,
+            'notice' => 2,
+            'warning' => 3,
+            'error' => 4,
+            'critical' => 5,
+            'alert' => 6,
+            'emergency' => 7,
+        );
+        $level = is_string($level) ? strtolower($level) : 'error';
+        return isset($map[$level]) ? $map[$level] : 4;
+    }
+
+    /**
+     * Forward a log record (Log::error, caught-and-logged error, etc.) as a handled
+     * event through the SAME buffered/shutdown delivery path events use.
+     *
+     * No-op unless the config is usable, capture_logs is on and $level is at/above the
+     * configured log_level. When $context['exception'] is a Throwable, its class/file/line
+     * and a full stacktrace are used; otherwise a synthetic 'Log' class with a caller
+     * frame + lightweight backtrace is built. The context is redacted (password/token/
+     * secret/authorization/...) and the raw Throwable is replaced by its class/message.
+     * NEVER throws.
+     *
+     * @param string $level   PSR level.
+     * @param string $message Log message.
+     * @param array  $context Monolog context.
+     * @return void
+     */
+    public function recordLogEvent($level, $message, array $context = array())
+    {
+        try {
+            if (!$this->config->isUsable() || !$this->config->captureLogs) {
+                return;
+            }
+            $level = is_string($level) ? strtolower($level) : 'error';
+            if (self::levelSeverity($level) < self::levelSeverity($this->config->logLevel)) {
+                return;
+            }
+            if (!$this->shouldSample()) {
+                return;
+            }
+
+            $message = is_string($message) ? $message : $this->stringifyMessage($message);
+
+            $throwable = isset($context['exception']) ? $context['exception'] : null;
+            $isThrowable = ($throwable instanceof \Throwable || $throwable instanceof \Exception);
+
+            $excClass = 'Log';
+            $file = null;
+            $line = null;
+            $stacktrace = null;
+
+            if ($isThrowable) {
+                $excClass = get_class($throwable);
+                $file = $throwable->getFile();
+                $line = $throwable->getLine();
+                $stacktrace = StacktraceBuilder::fromThrowable(
+                    $throwable,
+                    $this->config->codeContextLines,
+                    $this->config->codeFullFunction
+                );
+                if ($message === '') {
+                    $message = $throwable->getMessage();
+                }
+            } else {
+                $caller = CallerFinder::find();
+                if ($caller !== null) {
+                    $file = $caller['file'];
+                    $line = $caller['line'];
+                }
+                $stacktrace = $this->lightweightBacktrace();
+            }
+
+            $ctx = $this->collectContext();
+            $payload = array(
+                'type' => 'log',
+                'exception_class' => $excClass,
+                'message' => $message,
+                'file' => $file,
+                'line' => $line,
+                'level' => $level,
+                'handled' => true,
+                'release' => $this->config->release,
+                'environment' => $this->config->environment,
+                'stacktrace' => $stacktrace,
+                'request' => $ctx['request'],
+                'session' => $ctx['session'],
+                'user' => $ctx['user'],
+                'device' => Compat::runtime(),
+                'breadcrumbs' => $this->breadcrumbs->all(),
+                'context' => array_merge($this->extraContext, $ctx['context'], $this->sanitizeLogContext($context)),
+            );
+
+            $this->dispatch($payload);
+        } catch (\Exception $e) {
+            // Telemetry must be non-fatal.
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
+    }
+
+    /**
+     * Best-effort string form of a non-string log message (Throwable/stringable/other).
+     *
+     * @param mixed $message
+     * @return string
+     */
+    private function stringifyMessage($message)
+    {
+        if (is_string($message)) {
+            return $message;
+        }
+        if ($message instanceof \Throwable || $message instanceof \Exception) {
+            return $message->getMessage();
+        }
+        if (is_scalar($message) || $message === null) {
+            return (string) $message;
+        }
+        if (is_object($message) && method_exists($message, '__toString')) {
+            return (string) $message;
+        }
+        return is_object($message) ? '[object ' . get_class($message) . ']' : '[' . gettype($message) . ']';
+    }
+
+    /**
+     * Redact a log context array for transport: strip configured secret keys, replace a
+     * raw 'exception' Throwable with its class/message, and reduce other objects to a
+     * light placeholder so serialization stays safe. Never throws.
+     *
+     * @param array $context
+     * @return array
+     */
+    private function sanitizeLogContext(array $context)
+    {
+        $out = array();
+        foreach ($context as $k => $v) {
+            if ($k === 'exception' && ($v instanceof \Throwable || $v instanceof \Exception)) {
+                $out[$k] = array(
+                    'class' => get_class($v),
+                    'message' => $v->getMessage(),
+                );
+            } elseif (is_object($v)) {
+                if ($v instanceof \DateTimeInterface) {
+                    $out[$k] = $v->format('Y-m-d H:i:s');
+                } elseif (method_exists($v, '__toString')) {
+                    $out[$k] = (string) $v;
+                } else {
+                    $out[$k] = '[object ' . get_class($v) . ']';
+                }
+            } else {
+                $out[$k] = $v;
+            }
+        }
+        return $this->collector->redactArray($out);
+    }
+
+    /**
+     * A lightweight call stack for synthetic ('Log') events: the frames leading to the
+     * log call, excluding the SDK's own src/ frames. No source-code capture — just
+     * file/line/function/class/type. Never throws.
+     *
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function lightweightBacktrace()
+    {
+        try {
+            $sdkDir = str_replace('\\', '/', __DIR__); // src/
+            $frames = array();
+            $bt = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 50);
+            foreach ($bt as $t) {
+                $file = isset($t['file']) && is_string($t['file']) ? str_replace('\\', '/', $t['file']) : null;
+                if ($file !== null && strpos($file, $sdkDir . '/') === 0) {
+                    continue; // inside the SDK itself
+                }
+                $frames[] = array(
+                    'file' => isset($t['file']) ? $t['file'] : '[internal]',
+                    'line' => isset($t['line']) ? (int) $t['line'] : null,
+                    'function' => isset($t['function']) ? $t['function'] : null,
+                    'class' => isset($t['class']) ? $t['class'] : null,
+                    'type' => isset($t['type']) ? $t['type'] : null,
+                );
+                if (count($frames) >= 30) {
+                    break;
+                }
+            }
+            return count($frames) > 0 ? $frames : null;
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
      * Send a request/performance log.
      */
     public function captureRequest(array $data)

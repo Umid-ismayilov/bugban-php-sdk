@@ -88,6 +88,8 @@ require APPPATH . '../libs/bugban-php-sdk/autoload.php';
 | `timeout` | `3` | Transport timeout (s) |
 | `sample_rate` | `1.0` | 0–1 fraction of events to send |
 | `capture_requests` | `false` | Push per-request performance logs |
+| `capture_logs` | `false` | Forward `Bugban::recordLog()` records (Log::error+, caught-and-logged) as events |
+| `log_level` | `error` | Minimum PSR level forwarded when `capture_logs` is on |
 | `capture_queries` | `true` | Slow-query (performance) monitoring master switch |
 | `slow_query_ms` | `1000` | Only queries slower than this (ms) are reported |
 | `redact` | common secrets | Keys scrubbed before sending |
@@ -117,6 +119,30 @@ $pdo = new \Bugban\Sdk\Support\TracedPdo('mysql:host=localhost;dbname=app', $use
 ```
 
 The caller file/line (first frame outside `vendor/`), request URL + method, and redacted/capped bindings are attached automatically. Framework adapters (`bugban/laravel`, `bugban/codeigniter`, `bugban/yii2`) wire this up automatically.
+
+## Log capture
+Errors that are logged but never thrown — `Log::error(...)`, `try { ... } catch ($e) { log_it($e); }` — only reach your log file by default. Enable `capture_logs` and forward them to Bugban with `recordLog()`:
+
+```php
+\Bugban\Sdk\Bugban::init(array(
+    'api_key'      => 'bb_xxxxxxxx',
+    'host'         => 'https://bugban.online',
+    'capture_logs' => true,
+    'log_level'    => 'error',   // debug|info|notice|warning|error|critical|alert|emergency
+));
+
+// Pure message:
+\Bugban\Sdk\Bugban::recordLog('error', 'Payment reconciliation mismatch', array('order_id' => 123));
+
+// Caught-and-logged throwable (attach it as context['exception'] for a full stacktrace):
+try {
+    charge();
+} catch (\Throwable $e) {
+    \Bugban\Sdk\Bugban::recordLog('error', $e->getMessage(), array('exception' => $e));
+}
+```
+
+Records below `log_level` are dropped. Context is redacted (password/token/secret/authorization/...) and the raw `exception` object is reduced to its class+message. `recordLog()` never throws and is a silent no-op without an api_key. The **Laravel** adapter wires this automatically (`BUGBAN_CAPTURE_LOGS=true`); other frameworks call `recordLog()` from their log pipeline (e.g. a Monolog handler) or directly.
 
 ## What gets sent
 `POST {host}/api/ingest/events` with header `X-Bugban-Key: {api_key}` — exception class, message, file/line, stacktrace, request, auth user, session, breadcrumbs, context. Request logs go to `POST {host}/api/ingest/requests`. Slow queries go to `POST {host}/api/ingest/queries` (SQL text, duration ms, connection, caller file/line, url).

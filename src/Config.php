@@ -12,6 +12,8 @@ class Config
     /** @var int */ public $timeout;
     /** @var float */ public $sampleRate;
     /** @var bool */ public $captureRequests;
+    /** @var bool Forward error-level+ log records (Log::error, caught-and-logged) as events. */ public $captureLogs;
+    /** @var string Minimum PSR log level forwarded when $captureLogs is on (debug..emergency). */ public $logLevel;
     /** @var bool Capture slow database queries (see $slowQueryMs). */ public $captureQueries;
     /** @var int Minimum query duration (milliseconds) to report as a slow query. */ public $slowQueryMs;
     /** @var bool Run EXPLAIN on slow SELECTs (Laravel adapter / TracedPdo) to detect index usage. */ public $explainQueries;
@@ -36,6 +38,10 @@ class Config
         $this->timeout = isset($c['timeout']) ? (int) $c['timeout'] : 3;
         $this->sampleRate = isset($c['sample_rate']) ? (float) $c['sample_rate'] : 1.0;
         $this->captureRequests = isset($c['capture_requests']) ? (bool) $c['capture_requests'] : false;
+        // Auto-forward Log::error()/critical()/... records (and caught-and-logged errors) to
+        // Bugban. Off by default so existing installs don't suddenly change what they report.
+        $this->captureLogs = isset($c['capture_logs']) ? (bool) $c['capture_logs'] : false;
+        $this->logLevel = (isset($c['log_level']) && $c['log_level']) ? strtolower((string) $c['log_level']) : 'error';
         $this->captureQueries = isset($c['capture_queries']) ? (bool) $c['capture_queries'] : true;
         $this->slowQueryMs = isset($c['slow_query_ms']) ? (int) $c['slow_query_ms'] : 1000;
         $this->explainQueries = isset($c['explain_queries']) ? (bool) $c['explain_queries'] : true;
