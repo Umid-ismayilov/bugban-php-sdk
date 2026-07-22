@@ -13,4 +13,14 @@ interface Transport
      * @return void
      */
     public function send($url, $apiKey, array $payload);
+
+    /**
+     * GET a JSON document and return it decoded, or null on any failure.
+     * Used to ask Bugban whether a query test is waiting. Must never throw.
+     *
+     * @param string $url
+     * @param string $apiKey
+     * @return array|null
+     */
+    public function fetch($url, $apiKey);
 }

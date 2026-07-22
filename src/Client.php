@@ -3,6 +3,7 @@
 namespace Bugban\Sdk;
 
 use Bugban\Sdk\Support\Breadcrumbs;
+use Bugban\Sdk\Support\QueryTester;
 use Bugban\Sdk\Support\CallerFinder;
 use Bugban\Sdk\Support\Compat;
 use Bugban\Sdk\Support\ContextCollector;
@@ -42,6 +43,19 @@ class Client
     private $shutdownRegistered = false;
     /** @var bool True once the shutdown flush has begun; later captures then send inline. */
     private $shutdownStarted = false;
+    /**
+     * Adapter-supplied closure that executes a read-only statement on the
+     * application's OWN connection and returns the row count. Without one,
+     * query tests silently do nothing — which is the state of any app that has
+     * not wired an adapter.
+     * @var callable|null
+     */
+    private $queryRunner = null;
+    /** @var bool One test per process; a request must not become a test loop. */
+    private $testChecked = false;
+
+    /** Seconds between test polls, app-wide. Keeps the feature ~free. */
+    const TEST_POLL_SECONDS = 20;
 
     public function __construct(Config $config, Transport $transport = null)
     {
@@ -596,6 +610,114 @@ class Client
     public function flush()
     {
         $this->flushQueue();
+    }
+
+    /**
+     * Register the closure that runs a test statement. Called by the framework
+     * adapter (or by the app itself for a composer-less install).
+     *
+     * @param callable $runner function(string $sql, array $bindings): int
+     * @return void
+     */
+    public function setQueryRunner($runner)
+    {
+        if (!is_callable($runner)) {
+            return;
+        }
+        $this->queryRunner = $runner;
+
+        // Poll AFTER the response is delivered, so a waiting test costs the end
+        // user nothing. Registered here — not on capture — because the point of
+        // a test is to run when the query is no longer slow and nothing else
+        // would trigger a flush.
+        if ($this->config->isUsable() && $this->config->allowQueryTest) {
+            $self = $this;
+            register_shutdown_function(function () use ($self) {
+                $self->checkQueryTests();
+            });
+        }
+    }
+
+    /**
+     * At most one poll per POLL_SECONDS across the whole application, tracked by
+     * a temp-file mtime. Without this every request would add an HTTP GET.
+     *
+     * @return bool
+     */
+    private function shouldPollForTests()
+    {
+        try {
+            if (!function_exists('sys_get_temp_dir')) {
+                return false;
+            }
+            $dir = @sys_get_temp_dir();
+            if (!is_string($dir) || $dir === '' || !@is_dir($dir) || !@is_writable($dir)) {
+                return false;
+            }
+            $marker = rtrim($dir, '/\\') . '/bugban-test-' . md5($this->config->apiKey . '|' . $this->config->host);
+
+            if (@is_file($marker) && (time() - (int) @filemtime($marker)) < self::TEST_POLL_SECONDS) {
+                return false;
+            }
+            @file_put_contents($marker, (string) time());
+
+            return true;
+        } catch (\Exception $e) {
+            return false;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Ask Bugban whether a query test is waiting; if so run it and report back.
+     *
+     * Deliberately does nothing unless the app opted in AND an adapter supplied
+     * a runner. Runs at most once per process and never throws, so wiring it
+     * into a request lifecycle cannot hurt the host application.
+     *
+     * @return void
+     */
+    public function checkQueryTests()
+    {
+        if ($this->testChecked || !$this->config->isUsable()
+            || !$this->config->allowQueryTest || !is_callable($this->queryRunner)) {
+            return;
+        }
+        $this->testChecked = true;
+
+        if (!$this->shouldPollForTests()) {
+            return;
+        }
+
+        try {
+            $response = $this->transport->fetch($this->config->pendingTestsUrl(), $this->config->apiKey);
+            if (!is_array($response) || empty($response['test']) || !is_array($response['test'])) {
+                return;
+            }
+
+            $test = $response['test'];
+            $id = isset($test['id']) ? (int) $test['id'] : 0;
+            $sql = isset($test['sql']) ? (string) $test['sql'] : '';
+            $bindings = (isset($test['bindings']) && is_array($test['bindings'])) ? $test['bindings'] : array();
+            if ($id < 1) {
+                return;
+            }
+
+            $result = QueryTester::run($this->queryRunner, $sql, $bindings);
+
+            // Only timing and a row COUNT go back. Result rows never leave the
+            // customer's server — that is the whole point of running it here.
+            $this->sendOne($this->config->testResultUrl($id), array(
+                'duration_ms' => isset($result['duration_ms']) ? $result['duration_ms'] : null,
+                'rows'        => isset($result['rows']) ? $result['rows'] : null,
+                'error'       => isset($result['error']) ? $result['error'] : null,
+            ));
+        } catch (\Exception $e) {
+            // A monitoring feature must never break the app.
+        } catch (\Throwable $e) {
+            // Same for PHP 7+ engine errors.
+        }
     }
 
     private function flushQueue()

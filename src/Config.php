@@ -27,6 +27,20 @@ class Config
     /** @var string|null Framework name provided by an adapter (e.g. 'laravel'). */ public $framework;
     /** @var string|null Framework version provided by an adapter. */ public $frameworkVersion;
     /** @var string|null Notifier/SDK package name override (adapters may set e.g. 'bugban/laravel'). */ public $sdkName;
+    /**
+     * Allow Bugban to ask this app to re-run one of its own captured SELECTs and
+     * report the timing.
+     *
+     * ON by default, because every layer that would make it dangerous is
+     * removed: only a single SELECT/WITH runs (checked HERE, not just on the
+     * server), a LIMIT is forced, it runs inside a transaction that is always
+     * rolled back, and ONLY the duration and row COUNT travel back — never a
+     * single row of data. The statement is one this application already runs.
+     *
+     * Set BUGBAN_ALLOW_QUERY_TEST=false to switch it off.
+     * @var bool
+     */
+    public $allowQueryTest;
 
     public function __construct(array $c = array())
     {
@@ -65,6 +79,7 @@ class Config
         $this->framework = (isset($c['framework']) && $c['framework'] !== '' && $c['framework'] !== null) ? (string) $c['framework'] : null;
         $this->frameworkVersion = (isset($c['framework_version']) && $c['framework_version'] !== '' && $c['framework_version'] !== null) ? (string) $c['framework_version'] : null;
         $this->sdkName = (isset($c['sdk']) && $c['sdk'] !== '' && $c['sdk'] !== null) ? (string) $c['sdk'] : null;
+        $this->allowQueryTest = isset($c['allow_query_test']) ? (bool) $c['allow_query_test'] : true;
     }
 
     public function isUsable()
@@ -90,5 +105,17 @@ class Config
     public function pingUrl()
     {
         return $this->host . '/api/ingest/ping';
+    }
+
+    /** Where the SDK asks whether a query test is waiting for it. */
+    public function pendingTestsUrl()
+    {
+        return $this->host . '/api/ingest/tests/pending';
+    }
+
+    /** Where the SDK posts a finished test back. */
+    public function testResultUrl($id)
+    {
+        return $this->host . '/api/ingest/tests/' . (int) $id . '/result';
     }
 }

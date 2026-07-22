@@ -58,4 +58,29 @@ class StreamTransport implements Transport
     {
         return filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOLEAN);
     }
+
+    public function fetch($url, $apiKey)
+    {
+        try {
+            $context = stream_context_create(array('http' => array(
+                'method'        => 'GET',
+                'header'        => "Accept: application/json\r\n"
+                                 . 'X-Bugban-Key: ' . $apiKey . "\r\n"
+                                 . "User-Agent: bugban-php-sdk/1.0\r\n",
+                'timeout'       => $this->timeout,
+                'ignore_errors' => true,
+            )));
+            $body = @file_get_contents($url, false, $context);
+            if (!is_string($body) || $body === '') {
+                return null;
+            }
+            $data = json_decode($body, true);
+
+            return is_array($data) ? $data : null;
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
 }

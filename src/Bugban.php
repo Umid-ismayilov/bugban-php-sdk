@@ -11,7 +11,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
 
     /** @var Client|null */
     private static $client = null;
@@ -92,6 +92,80 @@ class Bugban
      * @param float|int $durationMs Duration in MILLISECONDS.
      * @param array  $meta       Optional: connection, bindings, file, line.
      */
+    /**
+     * Register how a query test should be executed. Framework adapters call
+     * this automatically; a composer-less install can pass its own PDO via
+     * setTestPdo() instead. Never throws.
+     *
+     * @param callable $runner function(string $sql, array $bindings): int
+     * @return void
+     */
+    public static function setQueryRunner($runner)
+    {
+        if (self::$client) {
+            self::$client->setQueryRunner($runner);
+        }
+    }
+
+    /**
+     * Convenience for apps without a framework adapter: hand the SDK a PDO and
+     * it builds the runner itself. The statement always runs inside a
+     * transaction that is rolled back, so a test can never alter data.
+     *
+     * @param \PDO $pdo
+     * @return void
+     */
+    public static function setTestPdo($pdo)
+    {
+        if (!self::$client || !($pdo instanceof \PDO)) {
+            return;
+        }
+        self::$client->setQueryRunner(function ($sql, array $bindings) use ($pdo) {
+            $inTransaction = false;
+            try {
+                $inTransaction = $pdo->beginTransaction();
+            } catch (\Exception $e) {
+                $inTransaction = false;   // e.g. DDL-implicit-commit engines
+            }
+            try {
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($bindings);
+                $rows = 0;
+                while ($stmt->fetch(\PDO::FETCH_NUM) !== false) {
+                    $rows++;
+                }
+                $stmt->closeCursor();
+
+                return $rows;
+            } catch (\Exception $e) {
+                throw $e;
+            } catch (\Throwable $e) {
+                throw $e;
+            } finally {
+                if ($inTransaction) {
+                    try {
+                        $pdo->rollBack();
+                    } catch (\Exception $e) {
+                        // Nothing was written anyway; a failed rollback is not fatal.
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Run one pending query test, if Bugban has queued one. Adapters call this
+     * at the end of a request; a manual install may call it from a cron script.
+     *
+     * @return void
+     */
+    public static function checkQueryTests()
+    {
+        if (self::$client) {
+            self::$client->checkQueryTests();
+        }
+    }
+
     public static function recordQuery($sql, $durationMs, array $meta = array())
     {
         if (self::$client) {
