@@ -11,7 +11,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.5.0';
+    const VERSION = '1.5.1';
 
     /** @var Client|null */
     private static $client = null;

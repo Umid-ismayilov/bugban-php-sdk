@@ -76,7 +76,12 @@ class Pinger
             if (!is_string($dir) || $dir === '' || !@is_dir($dir) || !@is_writable($dir)) {
                 return null;
             }
-            return rtrim($dir, '/\\') . '/bugban-ping-' . md5($config->apiKey . '|' . $config->host);
+            // The SDK VERSION is part of the key on purpose: after an upgrade the
+            // marker no longer matches, so the SDK pings again and the panel
+            // learns the new version. Without this an upgraded install would
+            // report its original version forever.
+            return rtrim($dir, '/\\') . '/bugban-ping-'
+                . md5($config->apiKey . '|' . $config->host . '|' . \Bugban\Sdk\Bugban::VERSION);
         } catch (\Exception $e) {
             return null;
         } catch (\Throwable $e) {
