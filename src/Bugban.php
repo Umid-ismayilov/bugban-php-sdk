@@ -11,7 +11,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.5.1';
+    const VERSION = '1.5.2';
 
     /** @var Client|null */
     private static $client = null;
@@ -102,7 +102,7 @@ class Bugban
      */
     public static function setQueryRunner($runner)
     {
-        if (self::$client) {
+        if (self::$client && method_exists(self::$client, 'setQueryRunner')) {
             self::$client->setQueryRunner($runner);
         }
     }
@@ -117,7 +117,8 @@ class Bugban
      */
     public static function setTestPdo($pdo)
     {
-        if (!self::$client || !($pdo instanceof \PDO)) {
+        if (!self::$client || !($pdo instanceof \PDO)
+            || !method_exists(self::$client, 'setQueryRunner')) {
             return;
         }
         self::$client->setQueryRunner(function ($sql, array $bindings) use ($pdo) {
@@ -161,7 +162,7 @@ class Bugban
      */
     public static function checkQueryTests()
     {
-        if (self::$client) {
+        if (self::$client && method_exists(self::$client, 'checkQueryTests')) {
             self::$client->checkQueryTests();
         }
     }
