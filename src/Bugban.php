@@ -11,7 +11,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.5.2';
+    const VERSION = '1.5.3';
 
     /** @var Client|null */
     private static $client = null;
@@ -121,7 +121,7 @@ class Bugban
             || !method_exists(self::$client, 'setQueryRunner')) {
             return;
         }
-        self::$client->setQueryRunner(function ($sql, array $bindings) use ($pdo) {
+        self::$client->setQueryRunner(function ($sql, array $bindings, $returnRows = false) use ($pdo) {
             $inTransaction = false;
             try {
                 $inTransaction = $pdo->beginTransaction();
@@ -131,6 +131,12 @@ class Bugban
             try {
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute($bindings);
+                if ($returnRows) {
+                    $out = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+                    $stmt->closeCursor();
+
+                    return is_array($out) ? $out : array();
+                }
                 $rows = 0;
                 while ($stmt->fetch(\PDO::FETCH_NUM) !== false) {
                     $rows++;

@@ -105,11 +105,21 @@ class QueryTester
             $rows = call_user_func($runner, $sql, $bindings);
             $ms = (microtime(true) - $started) * 1000;
 
-            return array(
+            // EXPLAIN the SAME statement right after timing it. Without this the
+            // panel can only show the index verdict from BEFORE the fix, which
+            // makes a freshly indexed query still look like a full scan.
+            $explain = self::explain($runner, $sql, $bindings);
+
+            $result = array(
                 'duration_ms' => round($ms, 2),
                 'rows'        => is_numeric($rows) ? (int) $rows : null,
                 'error'       => null,
             );
+            if ($explain !== null) {
+                $result['explain'] = $explain;
+            }
+
+            return $result;
         } catch (\Exception $e) {
             return array('error' => self::shorten($e->getMessage()));
         } catch (\Throwable $e) {
@@ -129,5 +139,49 @@ class QueryTester
         $message = (string) $message;
 
         return strlen($message) > 300 ? substr($message, 0, 300) . '…' : $message;
+    }
+
+    /**
+     * Run EXPLAIN for the tested statement so the panel gets a CURRENT index
+     * verdict. Optional by design: any failure returns null and the test still
+     * reports its timing. Never throws.
+     *
+     * @param callable $runner
+     * @param string   $sql
+     * @param array    $bindings
+     * @return array|null
+     */
+    private static function explain($runner, $sql, array $bindings)
+    {
+        try {
+            $rows = null;
+            // The runner returns a row COUNT, so ask it for the plan through the
+            // same channel by requesting rows back when it supports it.
+            if (!is_callable($runner)) {
+                return null;
+            }
+            $rows = call_user_func($runner, 'EXPLAIN ' . $sql, $bindings, true);
+            if (!is_array($rows) || empty($rows)) {
+                return null;
+            }
+
+            return ExplainParser::parse(self::driverGuess($sql), $rows);
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Best-effort driver hint for the parser. The adapter knows the real driver,
+     * but EXPLAIN output shape is what actually matters and the parser sniffs it.
+     *
+     * @param string $sql
+     * @return string
+     */
+    private static function driverGuess($sql)
+    {
+        return 'mysql';
     }
 }
