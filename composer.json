@@ -2,7 +2,12 @@
     "name": "bugban/php-sdk",
     "description": "Bugban error & monitoring SDK — framework-agnostic PHP core (captures exceptions, requests, auth & session).",
     "type": "library",
-    "keywords": ["bugban", "error-tracking", "monitoring", "exceptions"],
+    "keywords": [
+        "bugban",
+        "error-tracking",
+        "monitoring",
+        "exceptions"
+    ],
     "license": "MIT",
     "require": {
         "php": ">=7.0",
@@ -31,5 +36,10 @@
         "sort-packages": true
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "homepage": "https://bugban.online",
+    "support": {
+        "issues": "https://github.com/Umid-ismayilov/bugban-php-sdk/issues",
+        "docs": "https://bugban.online/integrations/php"
+    }
 }
