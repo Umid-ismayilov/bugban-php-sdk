@@ -119,8 +119,35 @@ class Pinger
         if ($config->frameworkVersion !== null) {
             $payload['framework_version'] = $config->frameworkVersion;
         }
+        // How the SDK was installed (composer|manual|none) and from which
+        // SAPI the ping fired. The panel uses these to tell manual installs
+        // apart from composer ones and to spot SDKs that never run in CLI.
+        // Guarded: an adapter may ship an older core without Updater.
+        $payload['sapi'] = PHP_SAPI;
+        $mode = self::installMode();
+        if ($mode !== null) {
+            $payload['install_mode'] = $mode;
+        }
 
         return $payload;
+    }
+
+    /**
+     * @return string|null composer|manual|none, null when it cannot be told
+     */
+    private static function installMode()
+    {
+        try {
+            if (!class_exists('\\Bugban\\Sdk\\Support\\Updater') || !method_exists('\\Bugban\\Sdk\\Support\\Updater', 'detectInstall')) {
+                return null;
+            }
+            $info = Updater::detectInstall();
+            return isset($info['mode']) && is_string($info['mode']) ? $info['mode'] : null;
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 
     /**
