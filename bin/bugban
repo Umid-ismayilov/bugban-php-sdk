@@ -1,0 +1,148 @@
+#!/usr/bin/env php
+<?php
+/**
+ * bugban — Bugban PHP SDK command line.
+ *
+ *   bugban check                  is a newer SDK published? (exit 10 = yes)
+ *   bugban update [--yes] [--dry-run]   upgrade the SDK in place (composer or manual install)
+ *   bugban version                print the installed version
+ *
+ * Config: --key=… --host=… flags, else BUGBAN_API_KEY / BUGBAN_HOST env, else a .env in the
+ * current directory. Exit codes: 0 ok · 10 update available · 1 error.
+ */
+
+// ---- locate the autoloader --------------------------------------------------------
+$candidates = array(
+    __DIR__ . '/../../../autoload.php',   // vendor/bugban/php-sdk/bin -> vendor/autoload.php
+    __DIR__ . '/../autoload.php',         // manual (composer-less) install / SDK checkout
+    __DIR__ . '/../vendor/autoload.php',  // SDK checkout with only a dev vendor/
+);
+$loaded = false;
+foreach ($candidates as $file) {
+    if (is_file($file)) {
+        require $file;
+        $loaded = true;
+        break;
+    }
+}
+if (!$loaded || !class_exists('Bugban\\Sdk\\Bugban')) {
+    fwrite(STDERR, "bugban: autoloader not found (run from a project with vendor/autoload.php)\n");
+    exit(1);
+}
+
+// ---- args -----------------------------------------------------------------------------------
+$argvCopy = isset($argv) ? array_slice($argv, 1) : array();
+$cmd = 'help';
+$opts = array();
+foreach ($argvCopy as $a) {
+    if (substr($a, 0, 2) === '--') {
+        $eq = strpos($a, '=');
+        if ($eq === false) {
+            $opts[substr($a, 2)] = true;
+        } else {
+            $opts[substr($a, 2, $eq - 2)] = substr($a, $eq + 1);
+        }
+    } elseif ($cmd === 'help') {
+        $cmd = $a;
+    }
+}
+
+function bugban_cli_env($key, $default = '')
+{
+    $v = getenv($key);
+    if (is_string($v) && $v !== '') {
+        return $v;
+    }
+    static $dotenv = null;
+    if ($dotenv === null) {
+        $dotenv = array();
+        $file = getcwd() . '/.env';
+        if (is_file($file)) {
+            foreach ((array) @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+                $line = trim($line);
+                if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) {
+                    continue;
+                }
+                list($k, $val) = explode('=', $line, 2);
+                $val = trim($val);
+                if ($val !== '' && ($val[0] === '"' || $val[0] === "'")) {
+                    $val = trim($val, $val[0]);
+                }
+                $dotenv[trim($k)] = $val;
+            }
+        }
+    }
+
+    return isset($dotenv[$key]) ? $dotenv[$key] : $default;
+}
+
+$key = isset($opts['key']) && is_string($opts['key']) ? $opts['key'] : bugban_cli_env('BUGBAN_API_KEY');
+$host = isset($opts['host']) && is_string($opts['host']) ? $opts['host'] : bugban_cli_env('BUGBAN_HOST', 'https://bugban.online');
+
+$config = new \Bugban\Sdk\Config(array('api_key' => $key, 'host' => $host, 'capture_runs' => false));
+$say = function ($line) {
+    fwrite(STDOUT, $line . "\n");
+};
+
+switch ($cmd) {
+    case 'version':
+    case '-v':
+    case '--version':
+        $say(\Bugban\Sdk\Bugban::VERSION);
+        exit(0);
+
+    case 'check':
+        $r = \Bugban\Sdk\Support\Updater::check($config);
+        if ($r['error'] !== null) {
+            fwrite(STDERR, "bugban: " . $r['error'] . "\n");
+            exit(1);
+        }
+        if ($r['update_available']) {
+            $say('update available: ' . $r['current'] . ' -> ' . $r['latest'] . '  (run: bugban update)');
+            exit(10);
+        }
+        $say('up to date: ' . $r['current']);
+        exit(0);
+
+    case 'update':
+        $dry = isset($opts['dry-run']);
+        $check = \Bugban\Sdk\Support\Updater::check($config);
+        if ($check['error'] !== null) {
+            fwrite(STDERR, "bugban: " . $check['error'] . "\n");
+            exit(1);
+        }
+        if (!$check['update_available']) {
+            $say('up to date: ' . $check['current']);
+            exit(0);
+        }
+        $install = \Bugban\Sdk\Support\Updater::detectInstall();
+        $say('current: ' . $check['current'] . '   latest: ' . $check['latest'] . '   install: ' . $install['mode'] . ($install['root'] ? ' (' . $install['root'] . ')' : ''));
+        if (!$dry && !isset($opts['yes'])) {
+            if (!function_exists('posix_isatty') || !@posix_isatty(STDIN)) {
+                fwrite(STDERR, "bugban: not a terminal; pass --yes to update non-interactively\n");
+                exit(1);
+            }
+            fwrite(STDOUT, 'Update ' . implode(', ', $install['packages']) . ' to ^' . $check['latest'] . '? [y/N] ');
+            $answer = strtolower(trim((string) fgets(STDIN)));
+            if ($answer !== 'y' && $answer !== 'yes') {
+                $say('aborted');
+                exit(1);
+            }
+        }
+        $r = \Bugban\Sdk\Support\Updater::update($config, null, $dry, $say);
+        $say(($r['ok'] ? 'OK: ' : 'FAILED: ') . $r['message']);
+        if ($r['ok'] && !$dry && $r['mode'] !== 'none') {
+            $say('restart long-running PHP processes (queue workers, Octane/Swoole, PHP-FPM reload) so they load the new code');
+        }
+        exit($r['ok'] ? 0 : 1);
+
+    default:
+        $say('bugban ' . \Bugban\Sdk\Bugban::VERSION);
+        $say('');
+        $say('  bugban check                        exit 10 when a newer SDK is published');
+        $say('  bugban update [--yes] [--dry-run]   upgrade bugban/* packages in place');
+        $say('  bugban version');
+        $say('');
+        $say('  --key=<api key> --host=<panel url>  (default: BUGBAN_API_KEY / BUGBAN_HOST, or ./.env)');
+        exit($cmd === 'help' ? 0 : 1);
+}

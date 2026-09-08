@@ -7,6 +7,7 @@ use Bugban\Sdk\Support\QueryTester;
 use Bugban\Sdk\Support\CallerFinder;
 use Bugban\Sdk\Support\Compat;
 use Bugban\Sdk\Support\ContextCollector;
+use Bugban\Sdk\Support\RunTracker;
 use Bugban\Sdk\Support\StacktraceBuilder;
 use Bugban\Sdk\Transport\CurlTransport;
 use Bugban\Sdk\Transport\StreamTransport;
@@ -54,6 +55,9 @@ class Client
     /** @var bool One test per process; a request must not become a test loop. */
     private $testChecked = false;
 
+    /** @var RunTracker|null CLI only: one record per process / queue job. */
+    private $runTracker = null;
+
     /** Seconds between test polls, app-wide. Keeps the feature ~free. */
     const TEST_POLL_SECONDS = 20;
 
@@ -63,6 +67,9 @@ class Client
         $this->transport = $transport ? $transport : self::defaultTransport($config->timeout);
         $this->breadcrumbs = new Breadcrumbs();
         $this->collector = new ContextCollector($config->redact);
+        // Background work (cron, queue, console) gets a per-run record so the
+        // panel can say which command loads the server. Never for web requests.
+        $this->runTracker = RunTracker::start($config, $this->transport);
     }
 
     /**
@@ -115,6 +122,7 @@ class Client
             return;
         }
 
+        $handled = self::takeHandled($extra, true);
         $ctx = $this->collectContext();
         $payload = array(
             'type' => 'error',
@@ -123,7 +131,7 @@ class Client
             'file' => $e->getFile(),
             'line' => $e->getLine(),
             'level' => 'error',
-            'handled' => true,
+            'handled' => $handled,
             'release' => $this->config->release,
             'environment' => $this->config->environment,
             'stacktrace' => StacktraceBuilder::fromThrowable($e, $this->config->codeContextLines, $this->config->codeFullFunction),
@@ -139,6 +147,42 @@ class Client
     }
 
     /**
+     * Report a throwable that nobody caught: it reached the framework's error
+     * handler, the global exception handler, or the shutdown function.
+     *
+     * Same payload as capture() but `handled=false`, which is what the panel's
+     * "Unhandled" view filters on (Bugsnag semantics: automatically captured =
+     * unhandled, explicit capture() = handled). Adapters MUST guard this call
+     * with method_exists() — a newer adapter over an older core must degrade to
+     * capture(), never fatal (v1.5.2 lesson).
+     *
+     * @param \Throwable|\Exception $e
+     */
+    public function captureUnhandled($e, array $extra = array())
+    {
+        $extra['handled'] = false;
+        $this->capture($e, $extra);
+    }
+
+    /**
+     * Pull the optional `handled` flag out of $extra so it never leaks into the
+     * context block. Returns the flag (default when absent).
+     *
+     * @param array $extra (by reference)
+     * @param bool $default
+     * @return bool
+     */
+    private static function takeHandled(array &$extra, $default)
+    {
+        $handled = $default;
+        if (array_key_exists('handled', $extra)) {
+            $handled = (bool) $extra['handled'];
+            unset($extra['handled']);
+        }
+        return $handled;
+    }
+
+    /**
      * Report a message / non-exception event (also used by error & shutdown handlers).
      */
     public function captureMessage($message, $level = 'info', array $extra = array())
@@ -147,6 +191,7 @@ class Client
             return;
         }
 
+        $handled = self::takeHandled($extra, true);
         $ctx = $this->collectContext();
         $payload = array(
             'type' => 'log',
@@ -155,7 +200,7 @@ class Client
             'file' => isset($extra['file']) ? $extra['file'] : null,
             'line' => isset($extra['line']) ? $extra['line'] : null,
             'level' => $level,
-            'handled' => true,
+            'handled' => $handled,
             'release' => $this->config->release,
             'environment' => $this->config->environment,
             'stacktrace' => null,
@@ -417,7 +462,13 @@ class Client
                 return;
             }
             $durationMs = (float) $durationMs;
-            if ($durationMs < $this->config->slowQueryMs) {
+            $isSlow = $durationMs >= $this->config->slowQueryMs;
+            if ($this->runTracker) {
+                // Every query counts toward the run's totals — the slow filter below
+                // only decides which ones are reported individually.
+                $this->runTracker->countQuery($durationMs, $isSlow);
+            }
+            if (!$isSlow) {
                 return;
             }
             if (count($this->queries) >= self::MAX_QUERY_BUFFER) {
@@ -471,6 +522,14 @@ class Client
                 }
                 if (!empty($_SERVER['REQUEST_METHOD'])) {
                     $row['method'] = (string) $_SERVER['REQUEST_METHOD'];
+                }
+            } elseif ($this->runTracker) {
+                // Background work: which command / cron / queue job ran this query,
+                // so the panel can group by process instead of by URL.
+                foreach ($this->runTracker->context() as $k => $v) {
+                    if ($v !== null && $v !== '') {
+                        $row[$k] = $v;
+                    }
                 }
             }
 
@@ -619,6 +678,66 @@ class Client
      * @param callable $runner function(string $sql, array $bindings): int
      * @return void
      */
+    // ---- Background-process attribution (CLI only) ----------------------
+
+    /** @return RunTracker|null */
+    public function runTracker()
+    {
+        return $this->runTracker;
+    }
+
+    /**
+     * Override the auto-detected command name (e.g. the adapter knows the
+     * artisan command that is really running).
+     */
+    public function setCommand($name)
+    {
+        if ($this->runTracker) {
+            $this->runTracker->setCommand($name);
+        }
+    }
+
+    /** @param string $source cron|scheduler|queue|artisan|script */
+    public function setRunSource($source)
+    {
+        if ($this->runTracker) {
+            $this->runTracker->setSource($source);
+        }
+    }
+
+    /** Exit code of the process run (adapters know it before shutdown). */
+    public function setExitCode($code)
+    {
+        if ($this->runTracker) {
+            $this->runTracker->setExitCode($code);
+        }
+    }
+
+    /**
+     * A long-lived worker starts one unit of work (queue job, message,
+     * scheduled task). Everything until endJob() is attributed to it.
+     */
+    public function beginJob($class, array $meta = array(), $source = 'queue')
+    {
+        if ($this->runTracker) {
+            $this->runTracker->beginJob($class, $meta, $source);
+        }
+    }
+
+    /**
+     * Unit of work finished. Also flushes buffered slow queries: a worker may
+     * live for days and shutdown flush would hold them until then.
+     */
+    public function endJob($exitCode = 0, $error = null)
+    {
+        if ($this->runTracker) {
+            $this->runTracker->endJob($exitCode, $error);
+        }
+        if (!empty($this->queries)) {
+            $this->flush();
+        }
+    }
+
     public function setQueryRunner($runner)
     {
         if (!is_callable($runner)) {

@@ -3,6 +3,7 @@
 namespace Bugban\Sdk;
 
 use Bugban\Sdk\Support\Pinger;
+use Bugban\Sdk\Support\Updater;
 
 /**
  * Global entry point. Works in ANY environment (pure PHP, CodeIgniter, Symfony, WordPress...).
@@ -11,7 +12,7 @@ use Bugban\Sdk\Support\Pinger;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.5.3';
+    const VERSION = '1.7.0';
 
     /** @var Client|null */
     private static $client = null;
@@ -28,6 +29,10 @@ class Bugban
     {
         self::$client = new Client(new Config($config));
         Pinger::maybePing(self::$client->config());
+        // Web requests: daily self-update check after the response is flushed
+        // (CLI runs get theirs from RunTracker::finish()). No-op unless
+        // auto_update is on.
+        Updater::registerWebHook(self::$client->config());
         return self::$client;
     }
 
@@ -35,6 +40,7 @@ class Bugban
     {
         self::$client = $client;
         Pinger::maybePing($client->config());
+        Updater::registerWebHook($client->config());
     }
 
     /**
@@ -52,6 +58,18 @@ class Bugban
     {
         if (self::$client) {
             self::$client->capture($e, $extra);
+        }
+    }
+
+    /**
+     * Report an uncaught throwable (handled=false). See Client::captureUnhandled().
+     *
+     * @param \Throwable|\Exception $e
+     */
+    public static function captureUnhandled($e, array $extra = array())
+    {
+        if (self::$client) {
+            self::$client->captureUnhandled($e, $extra);
         }
     }
 
@@ -166,6 +184,75 @@ class Bugban
      *
      * @return void
      */
+    // ---- Background-process attribution (needs core >= 1.7.0) ----------
+    // All guarded with method_exists(): a newer adapter over an older core
+    // must never fatal the host application (v1.5.2 lesson).
+
+    // ---- Self-update (core >= 1.7.0) --------------------------------------
+
+    /** @return array current, latest, update_available, error */
+    public static function checkForUpdate()
+    {
+        if (!self::$client) {
+            return array('current' => self::VERSION, 'latest' => null, 'update_available' => false, 'error' => 'Bugban::init() not called');
+        }
+
+        return \Bugban\Sdk\Support\Updater::check(self::$client->config());
+    }
+
+    /**
+     * Upgrade the installed SDK to the newest release (composer or manual install).
+     * @return array ok, mode, from, to, message, output
+     */
+    public static function update($dryRun = false, $log = null)
+    {
+        if (!self::$client) {
+            return array('ok' => false, 'mode' => 'none', 'from' => self::VERSION, 'to' => null, 'message' => 'Bugban::init() not called', 'output' => '');
+        }
+
+        return \Bugban\Sdk\Support\Updater::update(self::$client->config(), null, $dryRun, $log);
+    }
+
+    public static function setCommand($name)
+    {
+        if (self::$client && method_exists(self::$client, 'setCommand')) {
+            self::$client->setCommand($name);
+        }
+    }
+
+    public static function setRunSource($source)
+    {
+        if (self::$client && method_exists(self::$client, 'setRunSource')) {
+            self::$client->setRunSource($source);
+        }
+    }
+
+    public static function setExitCode($code)
+    {
+        if (self::$client && method_exists(self::$client, 'setExitCode')) {
+            self::$client->setExitCode($code);
+        }
+    }
+
+    /**
+     * @param string $class  job class / task name
+     * @param array  $meta   small scalar map (queue, attempts, ...)
+     * @param string $source 'queue' (default) or 'scheduler' for inline scheduled tasks
+     */
+    public static function beginJob($class, array $meta = array(), $source = 'queue')
+    {
+        if (self::$client && method_exists(self::$client, 'beginJob')) {
+            self::$client->beginJob($class, $meta, $source);
+        }
+    }
+
+    public static function endJob($exitCode = 0, $error = null)
+    {
+        if (self::$client && method_exists(self::$client, 'endJob')) {
+            self::$client->endJob($exitCode, $error);
+        }
+    }
+
     public static function checkQueryTests()
     {
         if (self::$client && method_exists(self::$client, 'checkQueryTests')) {
@@ -230,19 +317,20 @@ class Bugban
             if (!(error_reporting() & $severity)) {
                 return false;
             }
-            Bugban::captureMessage($message, 'error', array('severity' => $severity, 'file' => $file, 'line' => $line));
+            // Reached us through PHP's own error path, not an explicit call → unhandled.
+            Bugban::captureMessage($message, 'error', array('severity' => $severity, 'file' => $file, 'line' => $line, 'handled' => false));
             return false; // let PHP's normal handler run too
         });
 
         set_exception_handler(function ($e) {
-            Bugban::capture($e);
+            Bugban::captureUnhandled($e);
         });
 
         register_shutdown_function(function () {
             $err = error_get_last();
             $fatal = array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR);
             if ($err && in_array($err['type'], $fatal, true)) {
-                Bugban::captureMessage($err['message'], 'fatal', array('file' => $err['file'], 'line' => $err['line']));
+                Bugban::captureMessage($err['message'], 'fatal', array('file' => $err['file'], 'line' => $err['line'], 'handled' => false));
             }
         });
     }

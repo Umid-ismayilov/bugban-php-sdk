@@ -21,8 +21,8 @@ class ContextCollector
 
     public function request()
     {
-        if (PHP_SAPI === 'cli') {
-            return null;
+        if (PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg') {
+            return self::cliRequest();
         }
 
         $headers = function_exists('getallheaders') ? getallheaders() : array();
@@ -125,6 +125,60 @@ class ContextCollector
             }
         }
         return null;
+    }
+
+    /**
+     * CLI "request": the command line that was running when the error happened.
+     *
+     * A cron job or queue worker has no HTTP request, but the panel still needs
+     * to answer "where did this come from?". Bugsnag shows e.g.
+     * "artisan custom:declarations"; we do the same via the `request` block so
+     * the same header/route line renders without a second code path.
+     * Values that look like secrets (--password=..., --token=...) are masked.
+     *
+     * @return array|null
+     */
+    public static function cliRequest()
+    {
+        $argv = isset($_SERVER['argv']) && is_array($_SERVER['argv']) ? $_SERVER['argv'] : array();
+        if (empty($argv)) {
+            return array('method' => 'CLI', 'path' => 'php', 'url' => 'php', 'host' => php_uname('n'));
+        }
+        $script = basename((string) $argv[0]);
+        $args = array();
+        foreach (array_slice($argv, 1) as $a) {
+            $a = (string) $a;
+            if (preg_match('/^(--?[A-Za-z0-9_-]*(pass|password|secret|token|key|auth)[A-Za-z0-9_-]*)=(.*)$/i', $a, $m)) {
+                $a = $m[1] . '=[REDACTED]';
+            }
+            if (strlen($a) > 200) {
+                $a = substr($a, 0, 200) . '…';
+            }
+            $args[] = $a;
+        }
+        $command = $script . ($args ? ' ' . implode(' ', $args) : '');
+        if (strlen($command) > 1000) {
+            $command = substr($command, 0, 1000) . '…';
+        }
+        // First non-option argument is the command name (artisan/yii/console style).
+        $name = null;
+        foreach ($args as $a) {
+            if ($a !== '' && $a[0] !== '-') {
+                $name = $a;
+                break;
+            }
+        }
+        return array(
+            'method' => 'CLI',
+            'path' => $command,
+            'url' => $command,
+            'route' => $name,
+            'script' => $script,
+            'args' => $args,
+            'host' => php_uname('n'),
+            'pid' => function_exists('getmypid') ? getmypid() : null,
+            'cwd' => getcwd(),
+        );
     }
 
     public function session()

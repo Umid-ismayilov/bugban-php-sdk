@@ -40,6 +40,11 @@ class Config
      * Set BUGBAN_ALLOW_QUERY_TEST=false to switch it off.
      * @var bool
      */
+    /** Report one record per CLI process/queue job (command, duration, CPU, memory, query totals). */
+    public $captureRuns = true;
+    /** Opt-in: once a day (CLI only) upgrade the SDK to the newest release. */
+    public $autoUpdate = false;
+
     public $allowQueryTest;
 
     public function __construct(array $c = array())
@@ -80,6 +85,13 @@ class Config
         $this->frameworkVersion = (isset($c['framework_version']) && $c['framework_version'] !== '' && $c['framework_version'] !== null) ? (string) $c['framework_version'] : null;
         $this->sdkName = (isset($c['sdk']) && $c['sdk'] !== '' && $c['sdk'] !== null) ? (string) $c['sdk'] : null;
         $this->allowQueryTest = isset($c['allow_query_test']) ? (bool) $c['allow_query_test'] : true;
+        $this->captureRuns = isset($c['capture_runs']) ? (bool) $c['capture_runs'] : true;
+        if (isset($c['auto_update'])) {
+            $this->autoUpdate = filter_var($c['auto_update'], FILTER_VALIDATE_BOOLEAN);
+        } else {
+            $envAuto = getenv('BUGBAN_AUTO_UPDATE');
+            $this->autoUpdate = is_string($envAuto) && filter_var($envAuto, FILTER_VALIDATE_BOOLEAN);
+        }
     }
 
     public function isUsable()
@@ -105,6 +117,18 @@ class Config
     public function pingUrl()
     {
         return $this->host . '/api/ingest/ping';
+    }
+
+    /** Where a finished CLI process / queue job reports its resource usage. */
+    public function runsUrl()
+    {
+        return $this->host . '/api/ingest/runs';
+    }
+
+    /** Latest published SDK versions (for `bugban check|update`). */
+    public function latestUrl()
+    {
+        return $this->host . '/api/ingest/latest';
     }
 
     /** Where the SDK asks whether a query test is waiting for it. */

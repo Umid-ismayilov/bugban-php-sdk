@@ -144,6 +144,35 @@ try {
 
 Records below `log_level` are dropped. Context is redacted (password/token/secret/authorization/...) and the raw `exception` object is reduced to its class+message. `recordLog()` never throws and is a silent no-op without an api_key. The **Laravel** adapter wires this automatically (`BUGBAN_CAPTURE_LOGS=true`); other frameworks call `recordLog()` from their log pipeline (e.g. a Monolog handler) or directly.
 
+## Background runs (cron / queue / console)
+In CLI the SDK records one *run* per process: duration, CPU, peak memory, query count, slow-query count, exit code and the fatal error if any. Slow queries recorded inside the process carry the command name, so the panel's **Processes** tab shows which cron or job loads the server, which ones overlap and which fail. The source (`cron`, `scheduler`, `queue`, `artisan`, `script`) is detected from argv, the parent processes and the TTY; override it when needed:
+
+```php
+\Bugban\Sdk\Bugban::setCommand('reports:nightly');   // name shown in the panel
+\Bugban\Sdk\Bugban::setRunSource('cron');            // cron|scheduler|queue|artisan|script
+\Bugban\Sdk\Bugban::setExitCode(1);                  // when you exit() yourself with a status
+```
+
+Disable with `'capture_runs' => false` in `init()`. Web requests are never recorded as runs.
+
+## Updating the SDK
+The SDK can update itself. Composer or manual install — same command:
+
+```bash
+vendor/bin/bugban check              # exit 10 when a newer version is published
+vendor/bin/bugban update             # asks, then upgrades every installed bugban/* package
+vendor/bin/bugban update --yes       # no prompt (cron / CI)
+vendor/bin/bugban update --dry-run   # show what would happen
+```
+
+* **Composer install** — runs `composer require bugban/php-sdk:^<latest> bugban/<adapter>:^<latest> --update-with-dependencies` in your project root (core first, so an adapter can never run against an old core). `composer.lock` changes only on success.
+* **Manual install** (no composer, `autoload.php`) — downloads the release zip from GitHub, verifies the version inside, swaps `src/` atomically and keeps the old copy as `src.bak-<version>` for rollback. Run it as `php path/to/bugban-php-sdk/bin/bugban update`.
+* Key and host come from `BUGBAN_API_KEY` / `BUGBAN_HOST`, your `.env`, or `--key`/`--host`.
+
+**Automatic:** `'auto_update' => true` in `init()` or `BUGBAN_AUTO_UPDATE=true`. Once a day the SDK asks the panel for the latest version and, if newer, updates itself in a detached process. The check runs at the end of a CLI run (cron, queue, command) **or**, for sites without any cron, at the end of a web request *after the response has been sent* (`fastcgi_finish_request`), so visitors never wait for it. Works for composer and manual installs alike. Log: `<tmp>/bugban-update.log`. Restart long-running processes (queue workers) afterwards so they load the new code.
+
+From code: `Bugban::checkForUpdate()` → `['current','latest','update_available','error']`; `Bugban::update($dryRun = false)` → `['ok','mode','from','to','message']`. Neither throws.
+
 ## What gets sent
 `POST {host}/api/ingest/events` with header `X-Bugban-Key: {api_key}` — exception class, message, file/line, stacktrace, request, auth user, session, breadcrumbs, context. Request logs go to `POST {host}/api/ingest/requests`. Slow queries go to `POST {host}/api/ingest/queries` (SQL text, duration ms, connection, caller file/line, url).
 

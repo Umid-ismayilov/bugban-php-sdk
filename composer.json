@@ -19,6 +19,9 @@
     "require-dev": {
         "phpunit/phpunit": "^6.5 || ^7.5 || ^8.5 || ^9.5 || ^10.0"
     },
+    "bin": [
+        "bin/bugban"
+    ],
     "autoload": {
         "psr-4": {
             "Bugban\\Sdk\\": "src/"
