@@ -60,6 +60,52 @@ class Pinger
         }
     }
 
+    /** @var string|null Absolute path of the file that called Bugban::init(). */
+    private static $initFile = null;
+
+    /**
+     * @param string|null $file
+     * @return void
+     */
+    public static function rememberInitFile($file)
+    {
+        self::$initFile = is_string($file) && $file !== '' ? $file : null;
+    }
+
+    /**
+     * init() caller path made project-relative ("public/index.php",
+     * "bootstrap/app.php"). Falls back to the last three path segments when the
+     * project root is unknown, so no full server path leaves the machine.
+     *
+     * @return string|null
+     */
+    private static function relativeInitFile()
+    {
+        try {
+            $file = self::$initFile;
+            if ($file === null) {
+                return null;
+            }
+            $file = str_replace('\\', '/', $file);
+            $root = null;
+            if (class_exists('\\Bugban\\Sdk\\Support\\Updater') && method_exists('\\Bugban\\Sdk\\Support\\Updater', 'detectInstall')) {
+                $info = Updater::detectInstall();
+                if (is_array($info) && isset($info['root']) && is_string($info['root']) && $info['root'] !== '') {
+                    $root = rtrim(str_replace('\\', '/', $info['root']), '/');
+                }
+            }
+            if ($root !== null && strpos($file, $root . '/') === 0) {
+                return substr($file, strlen($root) + 1);
+            }
+            $parts = explode('/', trim($file, '/'));
+            return implode('/', array_slice($parts, -3));
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
     /**
      * Marker file path keyed by api_key + host, or null when unavailable.
      *
@@ -127,6 +173,10 @@ class Pinger
         $mode = self::installMode();
         if ($mode !== null) {
             $payload['install_mode'] = $mode;
+        }
+        $initFile = self::relativeInitFile();
+        if ($initFile !== null) {
+            $payload['init_file'] = $initFile;
         }
 
         return $payload;

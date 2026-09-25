@@ -12,7 +12,7 @@ use Bugban\Sdk\Support\Updater;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.7.1';
+    const VERSION = '1.7.2';
 
     /** @var Client|null */
     private static $client = null;
@@ -27,6 +27,29 @@ class Bugban
      */
     public static function init(array $config)
     {
+        // Idempotent: a second init() with the same api_key/host (typical after
+        // install.sh added bugban.php while an older hand-pasted snippet is
+        // still in public/index.php or a middleware) keeps the first client —
+        // no second ping, no doubled handlers, no duplicate events.
+        if (self::$client !== null) {
+            try {
+                $cur = self::$client->config();
+                $key = isset($config['api_key']) ? (string) $config['api_key'] : '';
+                $host = isset($config['host']) ? rtrim((string) $config['host'], '/') : null;
+                if ($key !== '' && $key === (string) $cur->apiKey
+                    && ($host === null || $host === rtrim((string) $cur->host, '/'))) {
+                    return self::$client;
+                }
+            } catch (\Exception $e) {
+                // fall through → re-init
+            } catch (\Throwable $e) {
+                // fall through → re-init
+            }
+        }
+        // Remember WHICH file called init() (project-relative in the ping) so
+        // the panel can say "your snippet is in public/index.php — artisan
+        // never loads that" instead of guessing.
+        Pinger::rememberInitFile(self::callerFile());
         self::$client = new Client(new Config($config));
         Pinger::maybePing(self::$client->config());
         // Web requests: daily self-update check after the response is flushed
@@ -34,6 +57,37 @@ class Bugban
         // auto_update is on.
         Updater::registerWebHook(self::$client->config());
         return self::$client;
+    }
+
+    /**
+     * The first stack frame outside the SDK's own source tree, or null.
+     *
+     * @return string|null
+     */
+    private static function callerFile()
+    {
+        try {
+            if (!function_exists('debug_backtrace')) {
+                return null;
+            }
+            $frames = @debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 6);
+            if (!is_array($frames)) {
+                return null;
+            }
+            $sdk = dirname(__DIR__);
+            foreach ($frames as $f) {
+                if (!isset($f['file']) || !is_string($f['file']) || $f['file'] === '') {
+                    continue;
+                }
+                if (strpos($f['file'], $sdk . DIRECTORY_SEPARATOR) === 0) {
+                    continue;
+                }
+                return $f['file'];
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+        return null;
     }
 
     public static function setClient(Client $client)

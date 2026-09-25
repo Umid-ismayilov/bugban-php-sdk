@@ -218,6 +218,32 @@ class Updater
             return $info;
         }
 
+        // Composer "path" repositories (and some deploy tools) SYMLINK
+        // vendor/bugban/php-sdk to a source folder, so __DIR__ resolves outside
+        // vendor/ and the check above misses. Composer 2 knows the truth
+        // directly; its class file sits at vendor/composer/InstalledVersions.php.
+        if (class_exists('\Composer\InstalledVersions') && method_exists('\Composer\InstalledVersions', 'isInstalled')) {
+            try {
+                if (\Composer\InstalledVersions::isInstalled('bugban/php-sdk')) {
+                    $ref = new \ReflectionClass('\Composer\InstalledVersions');
+                    $composerDir = dirname((string) $ref->getFileName());
+                    if (is_file($composerDir . '/installed.json')) {
+                        $info['mode'] = 'composer';
+                        $info['vendor'] = dirname($composerDir);
+                        $info['root'] = dirname($info['vendor']);
+                        $info['packages'] = self::installedBugbanPackages($composerDir . '/installed.json');
+                        if (!$info['packages']) {
+                            $info['packages'] = array('bugban/php-sdk');
+                        }
+
+                        return $info;
+                    }
+                }
+            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
+            }
+        }
+
         if (is_file($sdkRoot . '/autoload.php') && is_file($sdkRoot . '/src/Bugban.php')) {
             $info['mode'] = 'manual';
             $info['root'] = $sdkRoot;
@@ -419,8 +445,80 @@ class Updater
         self::say($log, 'old files kept in ' . $backup);
         $res['ok'] = true;
         $res['message'] = 'updated ' . Bugban::VERSION . ' -> ' . $latest . ' in ' . $root . ' (backup: ' . basename($backup) . ')';
+        // Adapters installed next to the core (libs/bugban-laravel, ...) ship
+        // the same version — keep them in step. Best effort: a failed adapter
+        // swap leaves the old adapter working and never undoes the core update.
+        $done = self::updateSiblingAdapters(dirname($root), $latest, $log);
+        if ($done) {
+            $res['message'] .= '; adapters: ' . implode(', ', $done);
+        }
 
         return $res;
+    }
+
+    /**
+     * @return string[] adapter dirs that were updated
+     */
+    private static function updateSiblingAdapters($libs, $latest, $log)
+    {
+        $out = array();
+        $repos = array(
+            'bugban-laravel' => 'bugban-laravel',
+            'bugban-symfony' => 'bugban-symfony',
+            'bugban-codeigniter' => 'bugban-codeigniter',
+            'bugban-yii2' => 'bugban-yii2',
+        );
+        foreach ($repos as $dir => $repo) {
+            $root = $libs . '/' . $dir;
+            if (!is_dir($root . '/src') || !is_writable($root)) {
+                continue;
+            }
+            try {
+                $url = 'https://github.com/Umid-ismayilov/' . $repo . '/archive/refs/tags/v' . $latest . '.zip';
+                self::say($log, 'downloading ' . $url);
+                $zip = self::download($url);
+                if ($zip === null) {
+                    continue;
+                }
+                $tmp = $zip . '.d';
+                @mkdir($tmp, 0755, true);
+                $za = new \ZipArchive();
+                if ($za->open($zip) !== true || !$za->extractTo($tmp)) {
+                    @unlink($zip);
+                    self::rmdir($tmp);
+                    continue;
+                }
+                $za->close();
+                @unlink($zip);
+                $src = self::findExtracted($tmp);
+                if ($src === null || !is_dir($src . '/src')) {
+                    self::rmdir($tmp);
+                    continue;
+                }
+                $backup = $root . '/src.bak-' . Bugban::VERSION;
+                self::rmdir($backup);
+                if (@rename($root . '/src', $backup)) {
+                    if (@rename($src . '/src', $root . '/src')) {
+                        foreach (array('config', 'composer.json', 'README.md') as $f) {
+                            if (is_dir($src . '/' . $f)) {
+                                self::rmdir($root . '/' . $f);
+                                @rename($src . '/' . $f, $root . '/' . $f);
+                            } elseif (is_file($src . '/' . $f)) {
+                                @copy($src . '/' . $f, $root . '/' . $f);
+                            }
+                        }
+                        $out[] = $dir;
+                    } else {
+                        @rename($backup, $root . '/src');
+                    }
+                }
+                self::rmdir($tmp);
+            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
+            }
+        }
+
+        return $out;
     }
 
     private static function download($url)
