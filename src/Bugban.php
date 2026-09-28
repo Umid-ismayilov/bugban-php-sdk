@@ -12,7 +12,7 @@ use Bugban\Sdk\Support\Updater;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.7.4';
+    const VERSION = '1.7.5';
 
     /** @var Client|null */
     private static $client = null;

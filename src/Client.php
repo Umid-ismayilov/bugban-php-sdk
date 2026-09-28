@@ -863,8 +863,9 @@ class Client
     }
 
     /**
-     * Web slow-query rows: add the signed-in user and the browser's user agent,
-     * so the panel can tell WHO hit the slow page. Resolved once per request,
+     * Slow-query rows: web rows get the signed-in user, the browser's user agent
+     * and the visitor IP; CLI rows the OS user and hostname — so the panel can
+     * tell WHO hit the slow page / ran the slow command. Resolved once per request,
      * at flush time (after the app has authenticated), never while a query is
      * being recorded — the auth lookup may itself query the database.
      *
@@ -874,6 +875,15 @@ class Client
     private function attachWho(array $rows)
     {
         if (PHP_SAPI === 'cli') {
+            // Cron / queue / artisan: no browser, but the OS account and the
+            // machine still answer "who ran it" (root vs www-data, which box).
+            $who = $this->cliWho();
+            if (empty($who)) {
+                return $rows;
+            }
+            foreach ($rows as $i => $row) {
+                $rows[$i] = array_merge($row, $who);
+            }
             return $rows;
         }
         $who = $this->requestWho();
@@ -888,7 +898,63 @@ class Client
         return $rows;
     }
 
-    /** @return array ('user' => array, 'user_agent' => string), either may be absent */
+    /** @return array ('os_user' => string, 'host' => string), either may be absent */
+    private function cliWho()
+    {
+        if ($this->who !== null) {
+            return $this->who;
+        }
+        $this->who = array();
+        try {
+            $name = null;
+            if (function_exists('posix_geteuid') && function_exists('posix_getpwuid')) {
+                $pw = @posix_getpwuid(posix_geteuid());
+                if (is_array($pw) && !empty($pw['name'])) {
+                    $name = $pw['name'];
+                }
+            }
+            if (empty($name)) {
+                $env = getenv('USER');
+                $name = $env ? $env : (function_exists('get_current_user') ? @get_current_user() : null);
+            }
+            if (is_string($name) && $name !== '') {
+                $this->who['os_user'] = substr($name, 0, 64);
+            }
+            $host = function_exists('gethostname') ? @gethostname() : null;
+            if (is_string($host) && $host !== '') {
+                $this->who['host'] = substr($host, 0, 120);
+            }
+        } catch (\Exception $e) {
+            // non-fatal
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
+        return $this->who;
+    }
+
+    /**
+     * Visitor IP for a web request. Cloudflare's header is set by the edge and
+     * can't be forged past it; X-Forwarded-For's first hop is the client when a
+     * proxy sits in front; REMOTE_ADDR otherwise.
+     *
+     * @return string|null
+     */
+    private function requestIp()
+    {
+        foreach (array('HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'REMOTE_ADDR') as $key) {
+            if (empty($_SERVER[$key]) || !is_string($_SERVER[$key])) {
+                continue;
+            }
+            $parts = explode(',', $_SERVER[$key]);
+            $ip = trim($parts[0]);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                return $ip;
+            }
+        }
+        return null;
+    }
+
+    /** @return array ('user' => array, 'user_agent' => string, 'ip' => string), any may be absent */
     private function requestWho()
     {
         if ($this->who !== null) {
@@ -923,6 +989,10 @@ class Client
             }
             if (is_string($ua) && $ua !== '') {
                 $this->who['user_agent'] = substr($ua, 0, 300);
+            }
+            $ip = $this->requestIp();
+            if ($ip !== null) {
+                $this->who['ip'] = $ip;
             }
         } catch (\Exception $e) {
             // non-fatal
