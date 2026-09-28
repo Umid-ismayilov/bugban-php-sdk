@@ -6,6 +6,7 @@ use Bugban\Sdk\Support\Breadcrumbs;
 use Bugban\Sdk\Support\QueryTester;
 use Bugban\Sdk\Support\CallerFinder;
 use Bugban\Sdk\Support\Compat;
+use Bugban\Sdk\Support\ExplainParser;
 use Bugban\Sdk\Support\ContextCollector;
 use Bugban\Sdk\Support\RunTracker;
 use Bugban\Sdk\Support\StacktraceBuilder;
@@ -64,6 +65,15 @@ class Client
 
     /** Seconds between test polls, app-wide. Keeps the feature ~free. */
     const TEST_POLL_SECONDS = 20;
+
+    /** Upper bound on EXPLAINs the core runs itself, per process per minute. */
+    const MAX_AUTO_EXPLAINS_PER_MINUTE = 20;
+    /** @var bool True while the core's own EXPLAIN runs — it re-enters query listeners. */
+    private static $explaining = false;
+    /** @var int */
+    private $explainWindowStart = 0;
+    /** @var int */
+    private $explainCount = 0;
 
     public function __construct(Config $config, Transport $transport = null)
     {
@@ -454,6 +464,11 @@ class Client
             if (!$this->config->isUsable() || !$this->config->captureQueries || $this->resolvingWho) {
                 return;
             }
+            // The EXPLAIN below goes through the app's own connection, so its
+            // DB::listen / profiler hooks call back in here — ignore that echo.
+            if (self::$explaining) {
+                return;
+            }
             if (!is_string($sql)) {
                 if (is_object($sql) && method_exists($sql, '__toString')) {
                     $sql = (string) $sql;
@@ -500,6 +515,19 @@ class Client
             // also pass their own meta['explain'] for other frameworks.
             if (isset($meta['explain']) && is_array($meta['explain']) && !empty($meta['explain'])) {
                 $row['explain'] = $meta['explain'];
+            } elseif (empty($meta['explain_tried'])) {
+                // Hand-written Bugban::recordQuery() calls (a DB::listen in the
+                // app, a CI/Yii/Symfony hook) carry no plan, so the panel could
+                // never say whether an index was used. Ask the database here.
+                $explain = $this->autoExplain(
+                    $sql,
+                    (isset($meta['bindings']) && is_array($meta['bindings'])) ? $meta['bindings'] : array(),
+                    isset($meta['connection']) && is_string($meta['connection']) ? $meta['connection'] : null,
+                    isset($meta['pdo']) ? $meta['pdo'] : null
+                );
+                if (is_array($explain) && !empty($explain)) {
+                    $row['explain'] = $explain;
+                }
             }
 
             // Caller: explicit meta wins; otherwise first stack frame outside
@@ -740,6 +768,194 @@ class Client
         if (!empty($this->queries)) {
             $this->flush();
         }
+    }
+
+    /**
+     * EXPLAIN a slow SELECT that arrived without a plan. Sources, first that
+     * works: meta['pdo'] (a PDO the caller passed), the Laravel container's
+     * connection by name (core-only installs inside Laravel), the adapter's
+     * query runner. Only plain SELECTs, rate-limited, and skipped inside an
+     * open PostgreSQL transaction — a failed EXPLAIN there would abort the
+     * host's transaction. Returns ExplainParser output or null. Never throws.
+     *
+     * @param string      $sql
+     * @param array       $bindings
+     * @param string|null $connection
+     * @param mixed       $pdo
+     * @return array|null
+     */
+    private function autoExplain($sql, array $bindings, $connection, $pdo)
+    {
+        if (!$this->config->explainQueries || self::$explaining) {
+            return null;
+        }
+        if (stripos(ltrim($sql), 'select') !== 0 || strpos(rtrim($sql, "; \t\n\r"), ';') !== false) {
+            return null;
+        }
+        $now = time();
+        if ($now - $this->explainWindowStart >= 60) {
+            $this->explainWindowStart = $now;
+            $this->explainCount = 0;
+        }
+        if ($this->explainCount >= self::MAX_AUTO_EXPLAINS_PER_MINUTE) {
+            return null;
+        }
+        $this->explainCount++;
+
+        self::$explaining = true;
+        // Each source is tried on its own: a missing Laravel connection name
+        // (e.g. a CI/Yii app that happens to load illuminate) must not stop
+        // the adapter's runner from being used.
+        $explain = null;
+        foreach (array('pdo', 'laravel', 'runner') as $source) {
+            try {
+                if ($source === 'pdo') {
+                    $explain = $pdo instanceof \PDO ? $this->explainWithPdo($pdo, $sql, $bindings) : null;
+                } elseif ($source === 'laravel') {
+                    $explain = $this->explainWithLaravel($sql, $bindings, $connection);
+                } elseif (is_callable($this->queryRunner)) {
+                    $rows = call_user_func($this->queryRunner, 'EXPLAIN ' . $sql, $bindings, true);
+                    if (is_array($rows) && !empty($rows)) {
+                        $explain = ExplainParser::parse(self::sniffExplainDriver($rows), self::rowsToArrays($rows));
+                    }
+                }
+            } catch (\Exception $e) {
+                $explain = null;
+            } catch (\Throwable $e) {
+                $explain = null;
+            }
+            if ($explain !== null) {
+                break;
+            }
+        }
+        self::$explaining = false;
+
+        return $explain;
+    }
+
+    /**
+     * @param \PDO   $pdo
+     * @param string $sql
+     * @param array  $bindings
+     * @return array|null
+     */
+    private function explainWithPdo($pdo, $sql, array $bindings)
+    {
+        $driver = strtolower((string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
+        $prefix = self::explainPrefix($driver);
+        if ($prefix === null || ($driver === 'pgsql' && $pdo->inTransaction())) {
+            return null;
+        }
+        $values = array();
+        foreach ($bindings as $k => $v) {
+            if ($v instanceof \DateTime || $v instanceof \DateTimeInterface) {
+                $v = $v->format('Y-m-d H:i:s');
+            } elseif (is_bool($v)) {
+                $v = $v ? 1 : 0;
+            } elseif (!is_scalar($v) && $v !== null) {
+                return null;
+            }
+            $values[] = $v;
+        }
+        $stmt = $pdo->prepare($prefix . $sql);
+        if (!$stmt || !$stmt->execute($values)) {
+            return null;
+        }
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $stmt->closeCursor();
+
+        return is_array($rows) && !empty($rows) ? ExplainParser::parse($driver, $rows) : null;
+    }
+
+    /**
+     * Core-only install inside a Laravel app (manual libs/, a DB::listen in
+     * AppServiceProvider): the container knows the connection by name.
+     *
+     * @param string      $sql
+     * @param array       $bindings
+     * @param string|null $connection
+     * @return array|null
+     */
+    private function explainWithLaravel($sql, array $bindings, $connection)
+    {
+        if (!function_exists('app')) {
+            return null;
+        }
+        $app = app();
+        if (!($app instanceof \Illuminate\Container\Container) || !$app->bound('db')) {
+            return null;
+        }
+        $conn = $app->make('db')->connection($connection !== null && $connection !== '' ? $connection : null);
+        if (!is_object($conn) || !method_exists($conn, 'getDriverName') || !method_exists($conn, 'select')) {
+            return null;
+        }
+        $driver = strtolower((string) $conn->getDriverName());
+        $prefix = self::explainPrefix($driver);
+        if ($prefix === null) {
+            return null;
+        }
+        if ($driver === 'pgsql' && method_exists($conn, 'transactionLevel') && $conn->transactionLevel() > 0) {
+            return null;
+        }
+        $rows = $conn->select($prefix . $sql, $bindings);
+
+        return is_array($rows) && !empty($rows) ? ExplainParser::parse($driver, self::rowsToArrays($rows)) : null;
+    }
+
+    /**
+     * @param string $driver
+     * @return string|null
+     */
+    private static function explainPrefix($driver)
+    {
+        if ($driver === 'sqlite') {
+            return 'EXPLAIN QUERY PLAN ';
+        }
+        if ($driver === 'mysql' || $driver === 'mariadb' || $driver === 'pgsql') {
+            return 'EXPLAIN ';
+        }
+
+        return null;
+    }
+
+    /**
+     * A runner does not say which database it talks to; the EXPLAIN shape does.
+     *
+     * @param array $rows
+     * @return string
+     */
+    private static function sniffExplainDriver(array $rows)
+    {
+        $first = reset($rows);
+        $first = is_object($first) ? (array) $first : $first;
+        if (is_array($first)) {
+            if (array_key_exists('QUERY PLAN', $first)) {
+                return 'pgsql';
+            }
+            if (array_key_exists('detail', $first) && !array_key_exists('select_type', $first)) {
+                return 'sqlite';
+            }
+        }
+
+        return 'mysql';
+    }
+
+    /**
+     * @param array $rows
+     * @return array
+     */
+    private static function rowsToArrays(array $rows)
+    {
+        $out = array();
+        foreach ($rows as $r) {
+            if (is_array($r)) {
+                $out[] = $r;
+            } elseif (is_object($r)) {
+                $out[] = (array) $r;
+            }
+        }
+
+        return $out;
     }
 
     public function setQueryRunner($runner)

@@ -44,7 +44,7 @@ class TracedPdoStatement extends \PDOStatement
         try {
             $durationMs = (microtime(true) - $start) * 1000;
             $bindings = (is_array($params) && !empty($params)) ? array_values($params) : array();
-            $meta = array('connection' => $this->bugbanConnection);
+            $meta = array('connection' => $this->bugbanConnection, 'explain_tried' => true);
             if (!empty($bindings)) {
                 $meta['bindings'] = $bindings;
             }

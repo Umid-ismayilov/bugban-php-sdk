@@ -190,7 +190,7 @@ class TracedPdo extends \PDO
     {
         try {
             $durationMs = (microtime(true) - $start) * 1000;
-            $meta = array('connection' => $this->bugbanDriver);
+            $meta = array('connection' => $this->bugbanDriver, 'explain_tried' => true);
             // query()/exec() carry no bindings; explain runs only for slow SELECTs.
             $explain = $this->bugbanMaybeExplain((string) $sql, $durationMs, array());
             if (is_array($explain)) {

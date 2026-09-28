@@ -12,7 +12,7 @@ use Bugban\Sdk\Support\Updater;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.7.5';
+    const VERSION = '1.7.6';
 
     /** @var Client|null */
     private static $client = null;
@@ -162,7 +162,10 @@ class Bugban
      *
      * @param string $sql        Raw SQL text.
      * @param float|int $durationMs Duration in MILLISECONDS.
-     * @param array  $meta       Optional: connection, bindings, file, line.
+     * @param array  $meta       Optional: connection, bindings, file, line, pdo.
+     *                          Slow SELECTs without meta['explain'] are EXPLAINed
+     *                          by the core (via meta['pdo'], the Laravel container
+     *                          or the adapter's query runner) for the index verdict.
      */
     /**
      * Register how a query test should be executed. Framework adapters call
