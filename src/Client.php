@@ -54,6 +54,10 @@ class Client
     private $queryRunner = null;
     /** @var bool One test per process; a request must not become a test loop. */
     private $testChecked = false;
+    /** @var array|null Web only: who made this request (user + user agent), resolved once. */
+    private $who = null;
+    /** @var bool True while resolving $who — the auth lookup may itself run queries. */
+    private $resolvingWho = false;
 
     /** @var RunTracker|null CLI only: one record per process / queue job. */
     private $runTracker = null;
@@ -447,7 +451,7 @@ class Client
     public function recordQuery($sql, $durationMs, array $meta = array())
     {
         try {
-            if (!$this->config->isUsable() || !$this->config->captureQueries) {
+            if (!$this->config->isUsable() || !$this->config->captureQueries || $this->resolvingWho) {
                 return;
             }
             if (!is_string($sql)) {
@@ -535,7 +539,7 @@ class Client
 
             if ($this->shutdownStarted) {
                 // Shutdown flush already ran — deliver inline so nothing is lost.
-                $this->sendOne($this->config->queriesUrl(), array('queries' => array($row)));
+                $this->sendOne($this->config->queriesUrl(), array('queries' => $this->attachWho(array($row))));
                 return;
             }
 
@@ -852,8 +856,81 @@ class Client
         $rows = $this->queries;
         $this->queries = array();
         if (!empty($rows)) {
-            $this->sendOne($this->config->queriesUrl(), array('queries' => array_slice($rows, 0, 50)));
+            $this->sendOne($this->config->queriesUrl(), array('queries' => $this->attachWho(array_slice($rows, 0, 50))));
         }
+        // A long-lived worker may serve another request (and user) next.
+        $this->who = null;
+    }
+
+    /**
+     * Web slow-query rows: add the signed-in user and the browser's user agent,
+     * so the panel can tell WHO hit the slow page. Resolved once per request,
+     * at flush time (after the app has authenticated), never while a query is
+     * being recorded — the auth lookup may itself query the database.
+     *
+     * @param array $rows
+     * @return array
+     */
+    private function attachWho(array $rows)
+    {
+        if (PHP_SAPI === 'cli') {
+            return $rows;
+        }
+        $who = $this->requestWho();
+        if (empty($who)) {
+            return $rows;
+        }
+        foreach ($rows as $i => $row) {
+            if (!isset($row['command'])) {
+                $rows[$i] = array_merge($row, $who);
+            }
+        }
+        return $rows;
+    }
+
+    /** @return array ('user' => array, 'user_agent' => string), either may be absent */
+    private function requestWho()
+    {
+        if ($this->who !== null) {
+            return $this->who;
+        }
+        $this->who = array();
+        $this->resolvingWho = true;
+        try {
+            $user = $this->user;
+            $ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : null;
+            if (is_callable($this->config->contextResolver)) {
+                $resolved = call_user_func($this->config->contextResolver);
+                if (is_array($resolved)) {
+                    if (!empty($resolved['user']) && is_array($resolved['user'])) {
+                        $user = $resolved['user'];
+                    }
+                    if (empty($ua) && isset($resolved['request']['user_agent'])) {
+                        $ua = $resolved['request']['user_agent'];
+                    }
+                }
+            }
+            if (is_array($user)) {
+                $clean = array();
+                foreach (array('id', 'email', 'name') as $k) {
+                    if (isset($user[$k]) && is_scalar($user[$k]) && (string) $user[$k] !== '') {
+                        $clean[$k] = substr((string) $user[$k], 0, 120);
+                    }
+                }
+                if (!empty($clean)) {
+                    $this->who['user'] = $clean;
+                }
+            }
+            if (is_string($ua) && $ua !== '') {
+                $this->who['user_agent'] = substr($ua, 0, 300);
+            }
+        } catch (\Exception $e) {
+            // non-fatal
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
+        $this->resolvingWho = false;
+        return $this->who;
     }
 
     /**
