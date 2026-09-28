@@ -126,8 +126,12 @@ class Pinger
             // marker no longer matches, so the SDK pings again and the panel
             // learns the new version. Without this an upgraded install would
             // report its original version forever.
+            // Package versions and the auto-update switch are part of it too:
+            // an adapter upgrade or BUGBAN_AUTO_UPDATE flip re-pings as well.
             return rtrim($dir, '/\\') . '/bugban-ping-'
-                . md5($config->apiKey . '|' . $config->host . '|' . \Bugban\Sdk\Bugban::VERSION);
+                . md5($config->apiKey . '|' . $config->host . '|' . \Bugban\Sdk\Bugban::VERSION
+                    . '|' . $config->sdkName . '|' . $config->sdkPackageVersion
+                    . '|' . ($config->autoUpdate ? '1' : '0') . '|' . self::installedStamp());
         } catch (\Exception $e) {
             return null;
         } catch (\Throwable $e) {
@@ -178,8 +182,101 @@ class Pinger
         if ($initFile !== null) {
             $payload['init_file'] = $initFile;
         }
+        // Every installed bugban package with its version, and whether the
+        // SDK's self-update (auto_update / BUGBAN_AUTO_UPDATE) is on.
+        $packages = self::packages($config);
+        if ($packages) {
+            $payload['packages'] = $packages;
+        }
+        $payload['auto_update'] = (bool) $config->autoUpdate;
+        $payload['auto_update_supported'] = true;
 
         return $payload;
+    }
+
+    /**
+     * mtime of composer's installed.json (changes on every composer
+     * install/update) — cheap enough for the per-request marker check,
+     * unlike parsing the file.
+     *
+     * @return string
+     */
+    private static function installedStamp()
+    {
+        try {
+            $vendor = self::vendorDir();
+            if ($vendor !== null) {
+                $t = @filemtime($vendor . '/composer/installed.json');
+                return $t ? (string) $t : '';
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+
+        return '';
+    }
+
+    /**
+     * @return string|null vendor/ dir when installed with composer
+     */
+    private static function vendorDir()
+    {
+        if (class_exists('\\Bugban\\Sdk\\Support\\Updater') && method_exists('\\Bugban\\Sdk\\Support\\Updater', 'detectInstall')) {
+            $info = Updater::detectInstall();
+            if (isset($info['mode'], $info['vendor']) && $info['mode'] === 'composer' && is_string($info['vendor'])) {
+                return $info['vendor'];
+            }
+        }
+
+        return null;
+    }
+
+    /** @var array|null Per-process cache of packages(). */
+    private static $packages = null;
+
+    /**
+     * {"bugban/php-sdk": "1.7.4", "bugban/laravel": "1.7.4"} — composer's
+     * installed.json when installed with composer; otherwise the core's own
+     * VERSION plus the adapter that initialised it (it passes its version).
+     *
+     * @param Config $config
+     * @return array
+     */
+    private static function packages(Config $config)
+    {
+        if (self::$packages !== null) {
+            return self::$packages;
+        }
+        $out = array();
+        try {
+            $vendor = self::vendorDir();
+            if ($vendor !== null) {
+                $data = json_decode((string) @file_get_contents($vendor . '/composer/installed.json'), true);
+                $list = is_array($data) && isset($data['packages']) && is_array($data['packages']) ? $data['packages'] : $data; // composer 2 vs 1
+                if (is_array($list)) {
+                    foreach ($list as $pkg) {
+                        if (!is_array($pkg) || !isset($pkg['name']) || strpos((string) $pkg['name'], 'bugban/') !== 0) {
+                            continue;
+                        }
+                        $v = isset($pkg['version']) ? ltrim((string) $pkg['version'], 'v') : '?';
+                        $out[(string) $pkg['name']] = $v;
+                    }
+                }
+            }
+            // Always true for the code that is actually running (a path repo or
+            // a dev branch shows up in installed.json as "dev-main").
+            $out['bugban/php-sdk'] = Bugban::VERSION;
+            if ($config->sdkName !== null && $config->sdkName !== 'bugban/php-sdk'
+                && (!isset($out[$config->sdkName]) || $config->sdkPackageVersion !== null)) {
+                $out[$config->sdkName] = $config->sdkPackageVersion !== null ? $config->sdkPackageVersion : '?';
+            }
+            ksort($out);
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+        self::$packages = $out;
+
+        return $out;
     }
 
     /**

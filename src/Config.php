@@ -27,6 +27,7 @@ class Config
     /** @var string|null Framework name provided by an adapter (e.g. 'laravel'). */ public $framework;
     /** @var string|null Framework version provided by an adapter. */ public $frameworkVersion;
     /** @var string|null Notifier/SDK package name override (adapters may set e.g. 'bugban/laravel'). */ public $sdkName;
+    /** @var string|null Version of the adapter package in $sdkName (adapters >= 1.7.4). */ public $sdkPackageVersion;
     /**
      * Allow Bugban to ask this app to re-run one of its own captured SELECTs and
      * report the timing.
@@ -84,6 +85,9 @@ class Config
         $this->framework = (isset($c['framework']) && $c['framework'] !== '' && $c['framework'] !== null) ? (string) $c['framework'] : null;
         $this->frameworkVersion = (isset($c['framework_version']) && $c['framework_version'] !== '' && $c['framework_version'] !== null) ? (string) $c['framework_version'] : null;
         $this->sdkName = (isset($c['sdk']) && $c['sdk'] !== '' && $c['sdk'] !== null) ? (string) $c['sdk'] : null;
+        // Version of the adapter package named by `sdk` (adapters >= 1.7.4 pass
+        // it). Reported in the ping so a stale adapter next to a fresh core shows.
+        $this->sdkPackageVersion = (isset($c['sdk_version']) && is_scalar($c['sdk_version']) && $c['sdk_version'] !== '') ? (string) $c['sdk_version'] : null;
         $this->allowQueryTest = isset($c['allow_query_test']) ? (bool) $c['allow_query_test'] : true;
         $this->captureRuns = isset($c['capture_runs']) ? (bool) $c['capture_runs'] : true;
         if (isset($c['auto_update'])) {

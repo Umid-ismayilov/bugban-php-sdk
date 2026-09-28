@@ -30,6 +30,9 @@ class CallerFinder
                 if (strpos($file, '/vendor/') !== false) {
                     continue; // inside Composer dependencies (frameworks, adapters...)
                 }
+                if (preg_match('~/bugban-(php-sdk|laravel|symfony|codeigniter|yii2)[^/]*/src/~', $file)) {
+                    continue; // a manually installed adapter (libs/bugban-laravel/src/...)
+                }
                 return array(
                     'file' => $frame['file'],
                     'line' => isset($frame['line']) ? (int) $frame['line'] : null,
