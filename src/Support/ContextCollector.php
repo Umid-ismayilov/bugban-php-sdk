@@ -193,6 +193,93 @@ class ContextCollector
         );
     }
 
+    /**
+     * Best-effort logged-in user from an ALREADY-started native PHP session
+     * (plain PHP, CodeIgniter 3/4 incl. Ion Auth, Shield and Myth:Auth use
+     * $_SESSION). Never starts a session, never throws; null when nothing
+     * recognisable is there.
+     *
+     * @return array|null
+     */
+    public static function sessionUser()
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE || empty($_SESSION) || !is_array($_SESSION)) {
+            return null;
+        }
+        $s = $_SESSION;
+        $user = array();
+
+        // A user record kept whole: $_SESSION['user'] = array('id' => .., ...)
+        foreach (array('user', 'auth_user', 'current_user', 'logged_user', 'admin', 'auth', 'member') as $k) {
+            if (!isset($s[$k])) {
+                continue;
+            }
+            $v = $s[$k];
+            if (is_object($v) && !($v instanceof \__PHP_Incomplete_Class)) {
+                $v = method_exists($v, 'toArray') ? $v->toArray() : get_object_vars($v);
+            }
+            if (is_array($v)) {
+                $id = self::firstScalar($v, array('id', 'user_id', 'uid', 'ID'));
+                if ($id !== null) {
+                    $user = array(
+                        'id' => $id,
+                        'email' => self::firstScalar($v, array('email', 'mail', 'user_email')),
+                        'name' => self::firstScalar($v, array('name', 'username', 'full_name', 'login', 'display_name')),
+                        'guard' => 'session:' . $k,
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Flat keys: $_SESSION['user_id'] = 5 (Ion Auth, hand-rolled logins).
+        if (empty($user)) {
+            foreach (array('user_id', 'userId', 'userid', 'uid', 'admin_id', 'id_user', 'member_id', 'customer_id', 'logged_in') as $k) {
+                if (!isset($s[$k]) || is_bool($s[$k]) || !is_scalar($s[$k]) || (string) $s[$k] === '') {
+                    continue;
+                }
+                // 'logged_in' is often just a true/1 flag — only a real id counts.
+                if ($k === 'logged_in' && (!is_numeric($s[$k]) || (int) $s[$k] <= 1)) {
+                    continue;
+                }
+                $user = array(
+                    'id' => $s[$k],
+                    'email' => self::firstScalar($s, array('email', 'user_email', 'identity')),
+                    'name' => self::firstScalar($s, array('username', 'user_name', 'name', 'full_name')),
+                    'guard' => 'session:' . $k,
+                );
+                break;
+            }
+        }
+
+        if (empty($user)) {
+            return null;
+        }
+        if (isset($user['email']) && strpos((string) $user['email'], '@') === false) {
+            // Ion Auth's 'identity' may be a username, not an email.
+            if (empty($user['name'])) {
+                $user['name'] = $user['email'];
+            }
+            $user['email'] = null;
+        }
+        return array_filter($user, function ($v) {
+            return $v !== null && $v !== '';
+        });
+    }
+
+    /**
+     * @return string|int|null
+     */
+    private static function firstScalar(array $a, array $keys)
+    {
+        foreach ($keys as $k) {
+            if (isset($a[$k]) && is_scalar($a[$k]) && !is_bool($a[$k]) && (string) $a[$k] !== '') {
+                return $a[$k];
+            }
+        }
+        return null;
+    }
+
     private function currentUrl()
     {
         if (empty($_SERVER['HTTP_HOST'])) {

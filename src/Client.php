@@ -8,6 +8,7 @@ use Bugban\Sdk\Support\CallerFinder;
 use Bugban\Sdk\Support\Compat;
 use Bugban\Sdk\Support\ExplainParser;
 use Bugban\Sdk\Support\ContextCollector;
+use Bugban\Sdk\Support\LaravelAuth;
 use Bugban\Sdk\Support\RunTracker;
 use Bugban\Sdk\Support\StacktraceBuilder;
 use Bugban\Sdk\Transport\CurlTransport;
@@ -59,6 +60,10 @@ class Client
     private $who = null;
     /** @var bool True while resolving $who — the auth lookup may itself run queries. */
     private $resolvingWho = false;
+    /** @var callable|null Adapter-registered "who is logged in" lookup (framework auth). */
+    private $userResolver = null;
+    /** @var bool Re-entrancy guard: the auth lookup may itself run queries or throw. */
+    private $resolvingUser = false;
 
     /** @var RunTracker|null CLI only: one record per process / queue job. */
     private $runTracker = null;
@@ -111,6 +116,67 @@ class Client
     {
         $this->user = $user;
         return $this;
+    }
+
+    /**
+     * Framework adapters register how to find the logged-in user, so nobody
+     * has to call setUser() by hand. A manual setUser() still wins.
+     *
+     * @param callable|null $resolver returns array('id','email','name','guard') or null
+     */
+    public function setUserResolver($resolver)
+    {
+        $this->userResolver = is_callable($resolver) ? $resolver : null;
+        return $this;
+    }
+
+    /**
+     * The user for this event: manual setUser() > adapter resolver > a
+     * best-effort look at an already-started PHP session. Never throws.
+     *
+     * @return array|null
+     */
+    private function autoUser()
+    {
+        if (!empty($this->user)) {
+            return $this->user;
+        }
+        if (!$this->config->autoUser || $this->resolvingUser) {
+            return null;
+        }
+        $this->resolvingUser = true;
+        $user = null;
+        try {
+            if ($this->userResolver !== null) {
+                $user = call_user_func($this->userResolver);
+            }
+        } catch (\Exception $e) {
+            $user = null;
+        } catch (\Throwable $e) {
+            $user = null;
+        }
+        // Manual Laravel install (no adapter): ask the running container.
+        if (empty($user) || !is_array($user)) {
+            try {
+                $user = LaravelAuth::user();
+            } catch (\Exception $e) {
+                $user = null;
+            } catch (\Throwable $e) {
+                $user = null;
+            }
+        }
+        // A failing adapter lookup must not also lose the plain-session user.
+        if (empty($user) || !is_array($user)) {
+            try {
+                $user = ContextCollector::sessionUser();
+            } catch (\Exception $e) {
+                $user = null;
+            } catch (\Throwable $e) {
+                $user = null;
+            }
+        }
+        $this->resolvingUser = false;
+        return (is_array($user) && !empty($user)) ? $user : null;
     }
 
     public function setContext($key, $value)
@@ -1192,9 +1258,12 @@ class Client
                     }
                 }
             }
+            if (empty($user)) {
+                $user = $this->autoUser();
+            }
             if (is_array($user)) {
                 $clean = array();
-                foreach (array('id', 'email', 'name') as $k) {
+                foreach (array('id', 'email', 'name', 'guard') as $k) {
                     if (isset($user[$k]) && is_scalar($user[$k]) && (string) $user[$k] !== '') {
                         $clean[$k] = substr((string) $user[$k], 0, 120);
                     }
@@ -1245,12 +1314,18 @@ class Client
                         $ctx[$k] = $resolved[$k];
                     }
                 }
+                if (empty($ctx['user'])) {
+                    $ctx['user'] = $this->autoUser();
+                }
                 return $ctx;
             }
         }
 
         $ctx['request'] = $this->collector->request();
         $ctx['session'] = $this->collector->session();
+        if (empty($ctx['user'])) {
+            $ctx['user'] = $this->autoUser();
+        }
         return $ctx;
     }
 

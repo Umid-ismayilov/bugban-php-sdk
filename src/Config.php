@@ -45,6 +45,8 @@ class Config
     public $captureRuns = true;
     /** Opt-in: once a day (CLI only) upgrade the SDK to the newest release. */
     public $autoUpdate = false;
+    /** Attach the logged-in user automatically (adapter auth lookup, then the PHP session). */
+    public $autoUser = true;
 
     public $allowQueryTest;
 
@@ -90,6 +92,7 @@ class Config
         $this->sdkPackageVersion = (isset($c['sdk_version']) && is_scalar($c['sdk_version']) && $c['sdk_version'] !== '') ? (string) $c['sdk_version'] : null;
         $this->allowQueryTest = isset($c['allow_query_test']) ? (bool) $c['allow_query_test'] : true;
         $this->captureRuns = isset($c['capture_runs']) ? (bool) $c['capture_runs'] : true;
+        $this->autoUser = isset($c['auto_user']) ? (bool) $c['auto_user'] : true;
         if (isset($c['auto_update'])) {
             $this->autoUpdate = filter_var($c['auto_update'], FILTER_VALIDATE_BOOLEAN);
         } else {

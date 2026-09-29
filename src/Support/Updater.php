@@ -114,7 +114,11 @@ class Updater
             if (!self::checkDue($config)) {
                 return false;
             }
-            @file_put_contents(self::markerPath($config), (string) time());
+            // No writable marker → no once-a-day guarantee → do not check at
+            // all (otherwise every request after 24h would hit the network).
+            if (@file_put_contents(self::markerPath($config), (string) time()) === false) {
+                return false;
+            }
 
             $check = self::check($config, $transport);
             if ($check['error'] !== null || !$check['update_available']) {
@@ -123,8 +127,22 @@ class Updater
 
             $bin = dirname(dirname(__DIR__)) . '/bin/bugban';
             $logFile = self::logPath();
-            if (DIRECTORY_SEPARATOR === '/' && is_file($bin) && function_exists('proc_open')) {
-                $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($bin) . ' update --yes';
+            $install = self::detectInstall();
+            $mode = isset($install['mode']) ? $install['mode'] : 'none';
+            $target = $mode === 'manual' && !empty($install['root']) ? $install['root']
+                : ($mode === 'composer' && !empty($install['vendor']) ? $install['vendor'] . '/bugban' : null);
+            if ($target !== null && (!@is_writable($target) || ($mode === 'manual' && !@is_writable($target . '/src')))) {
+                // e.g. php-fpm as www-data, libs/ owned by root: leave it to
+                // the CLI side (cron / artisan as the owner) — say so once a day.
+                @file_put_contents($logFile, '[' . date('c') . '] update ' . Bugban::VERSION . ' -> ' . $check['latest']
+                    . ' skipped: ' . $target . ' is not writable by ' . self::whoami()
+                    . ' (the owner\'s cron/CLI run will update it, or run: php ' . $bin . " update --yes)\n", FILE_APPEND);
+
+                return false;
+            }
+            $php = self::cliPhp();
+            if (DIRECTORY_SEPARATOR === '/' && is_file($bin) && function_exists('proc_open') && $php !== null) {
+                $cmd = escapeshellarg($php) . ' ' . escapeshellarg($bin) . ' update --yes';
                 $cmd = '(echo ' . escapeshellarg('[' . date('c') . '] auto-update ' . Bugban::VERSION . ' -> ' . $check['latest']) . '; ' . $cmd . ') >> ' . escapeshellarg($logFile) . ' 2>&1 &';
                 $env = self::childEnv($config);
                 $p = @proc_open($cmd, array(), $pipes, null, $env);
@@ -328,10 +346,10 @@ class Updater
     {
         $envBin = getenv('COMPOSER_BIN');
         if (is_string($envBin) && $envBin !== '' && is_file($envBin)) {
-            return substr($envBin, -5) === '.phar' ? array(PHP_BINARY, $envBin) : array($envBin);
+            return substr($envBin, -5) === '.phar' ? array(self::cliPhpOr(), $envBin) : array($envBin);
         }
         if (is_file($root . '/composer.phar')) {
-            return array(PHP_BINARY, $root . '/composer.phar');
+            return array(self::cliPhpOr(), $root . '/composer.phar');
         }
         $path = (string) getenv('PATH');
         $dirs = array_filter(explode(PATH_SEPARATOR, $path));
@@ -347,7 +365,7 @@ class Updater
             foreach (array('composer', 'composer.phar') as $name) {
                 $bin = rtrim($dir, '/') . '/' . $name;
                 if (is_file($bin) && (is_executable($bin) || $name === 'composer.phar')) {
-                    return $name === 'composer.phar' ? array(PHP_BINARY, $bin) : array($bin);
+                    return $name === 'composer.phar' ? array(self::cliPhpOr(), $bin) : array($bin);
                 }
             }
         }
@@ -366,7 +384,7 @@ class Updater
             return $res;
         }
         if (!is_writable($root) || !is_writable($root . '/src')) {
-            $res['message'] = $root . ' is not writable by ' . (function_exists('get_current_user') ? get_current_user() : 'this user');
+            $res['message'] = $root . ' is not writable by ' . self::whoami();
 
             return $res;
         }
@@ -690,8 +708,62 @@ class Updater
         if (!is_string($dir) || $dir === '' || !@is_dir($dir) || !@is_writable($dir)) {
             return null;
         }
+        // Per OS user: a root-owned marker must not block (or be un-touchable
+        // for) the www-data web workers, and vice versa.
+        $uid = function_exists('posix_geteuid') ? (string) @posix_geteuid() : self::whoami();
 
-        return $dir . '/.bugban-update-check-' . substr(md5($config->apiKey . '|' . dirname(dirname(__DIR__))), 0, 16);
+        return $dir . '/.bugban-update-check-' . substr(md5($config->apiKey . '|' . dirname(dirname(__DIR__)) . '|' . $uid), 0, 16);
+    }
+
+    /** Effective OS user name (not the script owner get_current_user() reports). */
+    private static function whoami()
+    {
+        if (function_exists('posix_geteuid') && function_exists('posix_getpwuid')) {
+            $pw = @posix_getpwuid(@posix_geteuid());
+            if (is_array($pw) && !empty($pw['name'])) {
+                return $pw['name'];
+            }
+        }
+        $u = getenv('USER');
+
+        return is_string($u) && $u !== '' ? $u : 'this user';
+    }
+
+    /**
+     * A php CLI binary for the detached `bin/bugban update`. Under php-fpm
+     * PHP_BINARY is empty or the fpm daemon itself — running that gave
+     * "sh: 1: : Permission denied". Prefer the same PHP version.
+     *
+     * @return string|null
+     */
+    public static function cliPhp()
+    {
+        if (PHP_SAPI === 'cli' && is_string(PHP_BINARY) && PHP_BINARY !== '' && @is_executable(PHP_BINARY)) {
+            return PHP_BINARY;
+        }
+        $ver = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+        $dirs = array_unique(array_filter(array(defined('PHP_BINDIR') ? PHP_BINDIR : null, '/usr/bin', '/usr/local/bin', '/opt/php/bin')));
+        foreach ($dirs as $d) {
+            foreach (array('php' . $ver, 'php' . str_replace('.', '', $ver), 'php') as $name) {
+                $f = rtrim($d, '/') . '/' . $name;
+                if (@is_file($f) && @is_executable($f)) {
+                    return $f;
+                }
+            }
+        }
+        if (is_string(PHP_BINARY) && PHP_BINARY !== '' && strpos(basename(PHP_BINARY), 'fpm') === false
+            && strpos(basename(PHP_BINARY), 'cgi') === false && @is_executable(PHP_BINARY)) {
+            return PHP_BINARY;
+        }
+
+        return null;
+    }
+
+    private static function cliPhpOr()
+    {
+        $p = self::cliPhp();
+
+        return $p !== null ? $p : 'php';
     }
 
     private static function transport()

@@ -12,7 +12,7 @@ use Bugban\Sdk\Support\Updater;
 class Bugban
 {
     /** SDK version (sent with the one-time install ping). */
-    const VERSION = '1.7.6';
+    const VERSION = '1.7.7';
 
     /** @var Client|null */
     private static $client = null;
@@ -38,6 +38,15 @@ class Bugban
                 $host = isset($config['host']) ? rtrim((string) $config['host'], '/') : null;
                 if ($key !== '' && $key === (string) $cur->apiKey
                     && ($host === null || $host === rtrim((string) $cur->host, '/'))) {
+                    // The older snippet may carry callbacks bugban.php lacks
+                    // (a hand-written context_resolver / before_send) — keep
+                    // them instead of silently dropping them.
+                    if (empty($cur->contextResolver) && isset($config['context_resolver']) && is_callable($config['context_resolver'])) {
+                        $cur->contextResolver = $config['context_resolver'];
+                    }
+                    if (empty($cur->beforeSend) && isset($config['before_send']) && is_callable($config['before_send'])) {
+                        $cur->beforeSend = $config['before_send'];
+                    }
                     return self::$client;
                 }
             } catch (\Exception $e) {
@@ -145,6 +154,20 @@ class Bugban
     {
         if (self::$client) {
             self::$client->setUser($user);
+        }
+    }
+
+    /**
+     * Register how to find the logged-in user (framework adapters do this, so
+     * apps never need a manual setUser()). The callable returns
+     * array('id' => .., 'email' => .., 'name' => .., 'guard' => ..) or null.
+     *
+     * @param callable|null $resolver
+     */
+    public static function setUserResolver($resolver)
+    {
+        if (self::$client) {
+            self::$client->setUserResolver($resolver);
         }
     }
 

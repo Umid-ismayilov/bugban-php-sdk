@@ -178,3 +178,19 @@ From code: `Bugban::checkForUpdate()` → `['current','latest','update_available
 
 ## API key & plans
 Your API key is issued from the Bugban panel per project and is tied to your plan/subscription. Higher plans raise ingest rate limits and retention.
+
+## Logged-in user (automatic)
+
+Every event and slow query carries the signed-in user without any code:
+
+| Stack | Where the user comes from |
+|---|---|
+| Laravel | every auth guard (`web`, `admin`, Sanctum/Passport tokens…); `guard` is reported |
+| Symfony | Security token of the matched firewall |
+| Yii2 | `user` and any other `yii\web\User` component |
+| CodeIgniter 4 + Shield | `auth()->user()` |
+| Plain PHP, CodeIgniter 3, Ion Auth, Myth:Auth | an already-started `$_SESSION` (`user_id`, `user['id']`, …) |
+
+`Bugban::setUser([...])` still works and always wins. Custom auth:
+`Bugban::setUserResolver(fn () => ['id' => .., 'email' => .., 'name' => ..])`.
+Turn it off with `'auto_user' => false`.
