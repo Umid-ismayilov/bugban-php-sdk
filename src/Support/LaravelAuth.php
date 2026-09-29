@@ -80,7 +80,7 @@ class LaravelAuth
                 if ($cold && method_exists($guard, 'getName')) {
                     // no started session: check() would see nobody, or log in
                     // through the remember cookie with events — fromCookies() below
-                    $u = method_exists($guard, 'hasUser') && $guard->hasUser() ? $guard->user() : null;
+                    $u = self::loadedUser($guard);
                 } elseif ($name === $default || in_array($name, $forced, true)) {
                     $u = $guard->check() ? $guard->user() : null;
                 } elseif (method_exists($guard, 'hasUser') && $guard->hasUser()) {
@@ -119,6 +119,30 @@ class LaravelAuth
     }
 
     /**
+     * The user a guard already resolved this request, without a lookup:
+     * hasUser() where it exists, else the guard's own $user property
+     * (Laravel 5.5–5.7 guards have no hasUser()). Laravel 5.5 saves the
+     * session at terminate, so a flush after that sees a "cold" session
+     * although the guard authenticated the request long before.
+     *
+     * @return mixed|null
+     */
+    public static function loadedUser($guard)
+    {
+        if (method_exists($guard, 'hasUser')) {
+            return $guard->hasUser() ? $guard->user() : null;
+        }
+        if (!property_exists($guard, 'user')) {
+            return null;
+        }
+        $prop = new \ReflectionProperty($guard, 'user');
+        $prop->setAccessible(true);
+        $u = $prop->getValue($guard);
+
+        return is_object($u) ? $u : null;
+    }
+
+    /**
      * @return bool  true when the request has no session the app started
      */
     public static function coldSession($session)
@@ -152,6 +176,10 @@ class LaravelAuth
             $cookie = (string) $app['config']->get('session.cookie', '');
             $raw = $cookie !== '' ? $req->cookies->get($cookie) : null;
             $id = is_string($raw) ? self::decryptCookie($enc, $raw) : null;
+            if ($id === null && is_string($raw) && preg_match('/^[a-zA-Z0-9]{40}$/', $raw)) {
+                // EncryptCookies already ran (flush at terminate): the value is plain
+                $id = $raw;
+            }
             if ($id !== null && preg_match('/^[a-zA-Z0-9]{40}$/', $id)) {
                 try {
                     $store = clone $app['session']->driver();
