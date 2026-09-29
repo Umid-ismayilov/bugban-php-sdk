@@ -41,8 +41,8 @@ class Compat
      */
     public static function closeCurl($ch)
     {
-        $isHandle = is_resource($ch) || (self::isPhp8() && $ch instanceof \CurlHandle);
-        if ($isHandle && function_exists('curl_close')) {
+        // PHP 8.0+: no-op, and deprecated since 8.5 — only PHP 7 resources need it.
+        if (is_resource($ch) && function_exists('curl_close')) {
             @curl_close($ch);
         }
     }

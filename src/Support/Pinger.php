@@ -29,7 +29,7 @@ class Pinger
      * @param Transport|null $transport Reuses the SDK transports when omitted.
      * @return void
      */
-    public static function maybePing(Config $config, Transport $transport = null)
+    public static function maybePing(Config $config, $transport = null)
     {
         try {
             if (self::$attempted || !$config->isUsable()) {
@@ -43,7 +43,7 @@ class Pinger
 
             self::$attempted = true;
 
-            if ($transport === null) {
+            if (!$transport instanceof Transport) {
                 $transport = self::defaultTransport();
             }
 

@@ -71,12 +71,17 @@ class LaravelAuth
         } catch (\Throwable $e) {
         }
 
+        $cold = self::coldSession($session);
         $later = array();
         foreach ($names as $name) {
             $u = null;
             try {
                 $guard = $auth->guard($name);
-                if ($name === $default || in_array($name, $forced, true)) {
+                if ($cold && method_exists($guard, 'getName')) {
+                    // no started session: check() would see nobody, or log in
+                    // through the remember cookie with events — fromCookies() below
+                    $u = method_exists($guard, 'hasUser') && $guard->hasUser() ? $guard->user() : null;
+                } elseif ($name === $default || in_array($name, $forced, true)) {
                     $u = $guard->check() ? $guard->user() : null;
                 } elseif (method_exists($guard, 'hasUser') && $guard->hasUser()) {
                     $u = $guard->user();
@@ -94,6 +99,9 @@ class LaravelAuth
                 return self::describe($u, $name);
             }
         }
+        if ($cold && ($found = self::fromCookies($app, $auth, $names)) !== null) {
+            return $found;
+        }
         foreach ($later as $name) {
             try {
                 $u = $auth->guard($name)->user();
@@ -108,6 +116,117 @@ class LaravelAuth
         }
 
         return null;
+    }
+
+    /**
+     * @return bool  true when the request has no session the app started
+     */
+    public static function coldSession($session)
+    {
+        return $session === null || (method_exists($session, 'isStarted') && !$session->isStarted());
+    }
+
+    /**
+     * Errors thrown before the "web" middleware group runs — 404s for missing
+     * files, 405s, a failing global middleware — have no started session, so
+     * every guard looks anonymous although the browser sent a logged-in
+     * session cookie (admin/courier/worker panels on their own guards too).
+     * Reads that session read-only (never saved, regenerated or migrated),
+     * then the guard's remember-me cookie, and looks the id up through the
+     * guard's own provider. No login events fire. Laravel 5.5+ / PHP 7.0+.
+     *
+     * @return array|null  id, email, name, guard
+     */
+    public static function fromCookies($app, $auth, array $names)
+    {
+        try {
+            if (!$app->bound('request') || !$app->bound('encrypter') || !$app->bound('session')) {
+                return null;
+            }
+            $req = $app['request'];
+            if (!is_object($req) || !isset($req->cookies) || !is_object($req->cookies)) {
+                return null;
+            }
+            $enc = $app['encrypter'];
+            $store = null;
+            $cookie = (string) $app['config']->get('session.cookie', '');
+            $raw = $cookie !== '' ? $req->cookies->get($cookie) : null;
+            $id = is_string($raw) ? self::decryptCookie($enc, $raw) : null;
+            if ($id !== null && preg_match('/^[a-zA-Z0-9]{40}$/', $id)) {
+                try {
+                    $store = clone $app['session']->driver();
+                    $store->setId($id);
+                    $store->start();
+                } catch (\Exception $e) {
+                    $store = null;
+                } catch (\Throwable $e) {
+                    $store = null;
+                }
+            }
+            foreach ($names as $name) {
+                try {
+                    $guard = $auth->guard($name);
+                    if (!method_exists($guard, 'getName') || !method_exists($guard, 'getProvider')) {
+                        continue;
+                    }
+                    $provider = $guard->getProvider();
+                    $u = null;
+                    if ($store !== null) {
+                        $uid = $store->get($guard->getName());
+                        if ($uid !== null && $uid !== '') {
+                            $u = $provider->retrieveById($uid);
+                        }
+                    }
+                    if (!$u && method_exists($guard, 'getRecallerName')) {
+                        $rc = $req->cookies->get($guard->getRecallerName());
+                        $val = is_string($rc) ? self::decryptCookie($enc, $rc) : null;
+                        $parts = $val !== null ? explode('|', $val, 3) : array();
+                        if (count($parts) >= 2 && $parts[0] !== '' && $parts[1] !== '') {
+                            $u = $provider->retrieveByToken($parts[0], $parts[1]);
+                        }
+                    }
+                } catch (\Exception $e) {
+                    $u = null;
+                } catch (\Throwable $e) {
+                    $u = null;
+                }
+                if ($u) {
+                    return self::describe($u, $name);
+                }
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+
+        return null;
+    }
+
+    /**
+     * A Laravel-encrypted cookie's plain value: serialized (≤5.5.41) or not,
+     * with or without the "<hmac>|" prefix Laravel 6.18+/7.22+ adds.
+     *
+     * @return string|null
+     */
+    private static function decryptCookie($enc, $raw)
+    {
+        try {
+            $v = $enc->decrypt($raw, false);
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (!is_string($v)) {
+            return null;
+        }
+        if (preg_match('/^s:\d+:"(.*)";$/s', $v, $m)) {
+            $v = $m[1];
+        }
+        if (strlen($v) > 41 && $v[40] === '|' && ctype_xdigit(substr($v, 0, 40))) {
+            $v = substr($v, 41);
+        }
+
+        return $v;
     }
 
     /**

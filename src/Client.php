@@ -9,6 +9,7 @@ use Bugban\Sdk\Support\Compat;
 use Bugban\Sdk\Support\ExplainParser;
 use Bugban\Sdk\Support\ContextCollector;
 use Bugban\Sdk\Support\LaravelAuth;
+use Bugban\Sdk\Support\YiiAuth;
 use Bugban\Sdk\Support\RunTracker;
 use Bugban\Sdk\Support\StacktraceBuilder;
 use Bugban\Sdk\Transport\CurlTransport;
@@ -80,10 +81,10 @@ class Client
     /** @var int */
     private $explainCount = 0;
 
-    public function __construct(Config $config, Transport $transport = null)
+    public function __construct(Config $config, $transport = null)
     {
         $this->config = $config;
-        $this->transport = $transport ? $transport : self::defaultTransport($config->timeout);
+        $this->transport = $transport instanceof Transport ? $transport : self::defaultTransport($config->timeout);
         $this->breadcrumbs = new Breadcrumbs();
         $this->collector = new ContextCollector($config->redact);
         // Background work (cron, queue, console) gets a per-run record so the
@@ -159,6 +160,16 @@ class Client
         if (empty($user) || !is_array($user)) {
             try {
                 $user = LaravelAuth::user();
+            } catch (\Exception $e) {
+                $user = null;
+            } catch (\Throwable $e) {
+                $user = null;
+            }
+        }
+        // Manual Yii2 install (no bugban/yii2 extension): ask Yii::$app.
+        if (empty($user) || !is_array($user)) {
+            try {
+                $user = YiiAuth::user();
             } catch (\Exception $e) {
                 $user = null;
             } catch (\Throwable $e) {
@@ -1321,11 +1332,13 @@ class Client
             }
         }
 
-        $ctx['request'] = $this->collector->request();
-        $ctx['session'] = $this->collector->session();
+        // User first: resolving it can set up the framework's session (e.g.
+        // Yii's custom session name), which the cookie redaction then sees.
         if (empty($ctx['user'])) {
             $ctx['user'] = $this->autoUser();
         }
+        $ctx['request'] = $this->collector->request();
+        $ctx['session'] = $this->collector->session();
         return $ctx;
     }
 

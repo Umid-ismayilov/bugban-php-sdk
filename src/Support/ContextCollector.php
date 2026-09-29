@@ -59,7 +59,7 @@ class ContextCollector
             'query' => $this->redactArray(isset($_GET) ? $_GET : array()),
             'body' => $body,
             'headers' => $this->redactArray(is_array($headers) ? $headers : array()),
-            'cookies' => $this->redactArray(isset($_COOKIE) ? $_COOKIE : array()),
+            'cookies' => self::redactCookies($this->redactArray(isset($_COOKIE) ? $_COOKIE : array()), function_exists('session_name') ? session_name() : null),
             'ip' => $this->clientIp(),
             'content_type' => $contentType,
             'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : null,
@@ -290,6 +290,26 @@ class ContextCollector
         $uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
 
         return $scheme . '://' . $_SERVER['HTTP_HOST'] . $uri;
+    }
+
+    /**
+     * Cookies safe to ship: the session cookie, remember-me, XSRF and any
+     * cookie named like session/token/auth are replaced, others kept.
+     *
+     * @return array
+     */
+    public static function redactCookies(array $cookies, $sessionCookie = null)
+    {
+        $out = array();
+        foreach ($cookies as $k => $v) {
+            $lk = strtolower((string) $k);
+            $secret = ($sessionCookie !== null && $sessionCookie !== '' && $lk === strtolower($sessionCookie))
+                || strpos($lk, 'remember_') === 0
+                || preg_match('/sess|token|auth|xsrf|csrf|jwt|identity|sid$/', $lk);
+            $out[$k] = $secret ? '[REDACTED]' : $v;
+        }
+
+        return $out;
     }
 
     public function redactArray(array $data)

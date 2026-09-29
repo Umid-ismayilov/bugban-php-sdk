@@ -31,7 +31,7 @@ class Updater
     /**
      * @return array current, latest, update_available, error
      */
-    public static function check(Config $config, Transport $transport = null)
+    public static function check(Config $config, $transport = null)
     {
         $out = array('current' => Bugban::VERSION, 'latest' => null, 'update_available' => false, 'error' => null);
         try {
@@ -40,7 +40,7 @@ class Updater
 
                 return $out;
             }
-            $transport = $transport ? $transport : self::transport();
+            $transport = $transport instanceof Transport ? $transport : self::transport();
             $data = $transport->fetch($config->latestUrl(), $config->apiKey);
             $latest = (is_array($data) && isset($data['latest']['php'])) ? trim((string) $data['latest']['php']) : '';
             if ($latest === '' || !preg_match('/^\d+\.\d+\.\d+/', $latest)) {
@@ -63,7 +63,7 @@ class Updater
      * @param callable|null $log receives progress lines (composer output etc.)
      * @return array ok, mode (composer|manual|none), from, to, message, output
      */
-    public static function update(Config $config, Transport $transport = null, $dryRun = false, $log = null)
+    public static function update(Config $config, $transport = null, $dryRun = false, $log = null)
     {
         $res = array('ok' => false, 'mode' => 'none', 'from' => Bugban::VERSION, 'to' => null, 'message' => '', 'output' => '');
         try {
@@ -105,7 +105,7 @@ class Updater
      * Never more than once per 24h per install; the actual work runs in a
      * detached process so the calling request/command finishes at normal speed.
      */
-    public static function maybeAutoUpdate(Config $config, Transport $transport = null, $allowWeb = false)
+    public static function maybeAutoUpdate(Config $config, $transport = null, $allowWeb = false)
     {
         try {
             if (!$config->autoUpdate || (PHP_SAPI !== 'cli' && !$allowWeb) || !$config->isUsable()) {
@@ -170,7 +170,7 @@ class Updater
      * the response has gone out (fastcgi_finish_request when available), so
      * the visitor never waits for the network. Cheap when not due: one stat().
      */
-    public static function registerWebHook(Config $config, Transport $transport = null)
+    public static function registerWebHook(Config $config, $transport = null)
     {
         if (!$config->autoUpdate || PHP_SAPI === 'cli' || !$config->isUsable()) {
             return;
